@@ -213,3 +213,16 @@ Implemented the first executable slice of the living specification for a local m
 
 - `git log --oneline -10` output:
   - `fatal: your current branch 'trunk' does not have any commits yet`
+
+## Commit Landing Snapshot
+
+- Repository state after landing commits:
+  - `browser_mcp: trunk @ 037b0d5`
+- Session-relevant commits:
+  - `2fe26e6` chore(submodule): add blueprint-mcp reference baseline
+  - `375a4c1` feat(local-mcp-bun): implement multiplexed browser mcp runtime
+  - `21e8942` ci(local-mcp-bun): add cross-platform hard-gate pipeline
+  - `b336e48` docs(agents): add repo operating directives
+  - `037b0d5` docs(spec): add living specification and session log
+- Push status:
+  - `trunk` pushed to `github` remote successfully.
