@@ -1,0 +1,4 @@
+node_modules/
+ci-evidence/
+playwright-report/
+test-results/

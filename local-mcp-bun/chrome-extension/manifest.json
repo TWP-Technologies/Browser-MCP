@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Local MCP Bun Extension",
+  "version": "0.1.0",
+  "description": "Modified by [KnotFalse]. Local-only extension bridge for multiplexed browser MCP.",
+  "permissions": [
+    "tabs",
+    "debugger",
+    "storage",
+    "alarms",
+    "scripting",
+    "webNavigation",
+    "management",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Local MCP Bun"
+  }
+}

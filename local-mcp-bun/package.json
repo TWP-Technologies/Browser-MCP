@@ -1,0 +1,26 @@
+{
+  "name": "local-mcp-bun",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-only multiplexed Browser MCP server built with Bun",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "test:e2e": "bun test tests/e2e",
+    "test:fault": "bun test tests/fault",
+    "test:concurrency": "bun test tests/concurrency",
+    "test:hard-gate": "bun run test:unit && bun run test:integration && bun run test:e2e && bun run test:fault && bun run test:concurrency",
+    "lint:spec": "bun run scripts/validate_living_spec.ts",
+    "lint:compliance": "bun run scripts/compliance_scan.ts",
+    "ci:evidence": "bun run scripts/write_ci_evidence.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "playwright": "^1.58.2",
+    "typescript": "^5.8.2"
+  }
+}
