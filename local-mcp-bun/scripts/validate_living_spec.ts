@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 function fail(message: string): never {
   console.error(`[living-spec] FAIL: ${message}`);
@@ -8,8 +9,7 @@ function fail(message: string): never {
 }
 
 function main(): void {
-  const spec_path = "../specs/local-multiplexed-browser-mcp-spec.md";
-  const resolved_path = new URL(spec_path, `file://${process.cwd()}/`).pathname;
+  const resolved_path = resolve(process.cwd(), "..", "specs", "local-multiplexed-browser-mcp-spec.md");
 
   if (!existsSync(resolved_path)) {
     fail(`missing required spec file: ${resolved_path}`);
