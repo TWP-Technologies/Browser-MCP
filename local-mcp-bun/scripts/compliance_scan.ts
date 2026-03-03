@@ -202,7 +202,8 @@ function build_report(root: string): compliance_report {
   const required_rules = compliance_rules.filter((rule) => rule.kind === "required_notice");
 
   for (const file of scanned_files) {
-    if (file.endsWith("scripts/compliance_scan.ts")) {
+    const normalized_file = file.replaceAll("\\", "/");
+    if (normalized_file.endsWith("/scripts/compliance_scan.ts") || normalized_file.endsWith("scripts/compliance_scan.ts")) {
       continue;
     }
 
