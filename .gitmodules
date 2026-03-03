@@ -1,0 +1,3 @@
+[submodule "blueprint-mcp"]
+	path = blueprint-mcp
+	url = https://github.com/railsblueprint/blueprint-mcp.git
