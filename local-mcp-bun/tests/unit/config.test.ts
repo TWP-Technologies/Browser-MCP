@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { assert_loopback_host, is_loopback_host, resolve_auth_token, resolve_bridge_mode } from "../../src/config";
+import {
+  assert_loopback_host,
+  is_loopback_host,
+  resolve_auth_token,
+  resolve_bridge_mode,
+  resolve_daemon_connect_timeout_ms,
+  resolve_daemon_idle_timeout_ms,
+  resolve_daemon_mode,
+  resolve_daemon_port,
+} from "../../src/config";
 
 test("is_loopback_host accepts loopback hostnames and addresses", () => {
   expect(is_loopback_host("localhost")).toBe(true);
@@ -61,4 +70,37 @@ test("resolve_bridge_mode fails fast for unsupported values", () => {
   expect(() => resolve_bridge_mode({ BRIDGE_MODE: "ws" })).toThrow(
     "BRIDGE_MODE must be either 'websocket' or 'in_memory'",
   );
+});
+
+test("resolve_daemon_mode defaults to auto for websocket mode", () => {
+  expect(resolve_daemon_mode({}, "websocket")).toBe("auto");
+});
+
+test("resolve_daemon_mode forces direct mode for in-memory bridge", () => {
+  expect(resolve_daemon_mode({ MCP_DAEMON_MODE: "auto" }, "in_memory")).toBe("direct");
+});
+
+test("resolve_daemon_mode validates configured values", () => {
+  expect(resolve_daemon_mode({ MCP_DAEMON_MODE: "proxy" }, "websocket")).toBe("proxy");
+  expect(resolve_daemon_mode({ MCP_DAEMON_MODE: "daemon" }, "websocket")).toBe("daemon");
+  expect(() => resolve_daemon_mode({ MCP_DAEMON_MODE: "shared" }, "websocket")).toThrow(
+    "MCP_DAEMON_MODE must be one of",
+  );
+});
+
+test("resolve_daemon_port defaults to bridge_port + 1", () => {
+  expect(resolve_daemon_port({}, 37777)).toBe(37778);
+});
+
+test("resolve_daemon_port accepts explicit values and guards invalid ones", () => {
+  expect(resolve_daemon_port({ MCP_DAEMON_PORT: "39000" }, 37777)).toBe(39000);
+  expect(resolve_daemon_port({ MCP_DAEMON_PORT: "0" }, 37777)).toBe(37778);
+  expect(resolve_daemon_port({ MCP_DAEMON_PORT: "70000" }, 37777)).toBe(37778);
+});
+
+test("resolve_daemon timeout helpers apply defaults and parse env", () => {
+  expect(resolve_daemon_idle_timeout_ms({})).toBe(900000);
+  expect(resolve_daemon_idle_timeout_ms({ MCP_DAEMON_IDLE_TIMEOUT_MS: "1200000" })).toBe(1200000);
+  expect(resolve_daemon_connect_timeout_ms({})).toBe(10000);
+  expect(resolve_daemon_connect_timeout_ms({ MCP_DAEMON_CONNECT_TIMEOUT_MS: "25000" })).toBe(25000);
 });
