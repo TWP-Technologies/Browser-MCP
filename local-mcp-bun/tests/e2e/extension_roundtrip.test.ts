@@ -10,6 +10,7 @@ import { local_mcp_runtime } from "../../src/runtime";
 
 const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
+const is_windows = process.platform === "win32";
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
@@ -86,16 +87,18 @@ beforeAll(async () => {
 
   user_data_dir = mkdtempSync(join(tmpdir(), "local-mcp-bun-e2e-"));
 
-  context = await chromium.launchPersistentContext(user_data_dir, {
-    channel: "chromium",
-    headless: true,
-    timeout: 180_000,
+  const launch_options = {
+    headless: !is_windows,
+    timeout: is_windows ? 240_000 : 180_000,
     ignoreDefaultArgs: ["--disable-extensions"],
     args: [
       `--disable-extensions-except=${extension_path}`,
       `--load-extension=${extension_path}`,
     ],
-  });
+    ...(is_windows ? {} : { channel: "chromium" as const }),
+  };
+
+  context = await chromium.launchPersistentContext(user_data_dir, launch_options);
 
   let service_worker = context.serviceWorkers()[0];
   if (!service_worker) {
