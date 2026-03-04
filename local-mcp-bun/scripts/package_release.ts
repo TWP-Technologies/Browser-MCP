@@ -22,7 +22,7 @@ interface package_cli_options {
   clean: boolean;
 }
 
-const release_asset_prefix = "local-mcp";
+const release_asset_prefix = "chrome-browser-mcp";
 
 function read_json_file<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
