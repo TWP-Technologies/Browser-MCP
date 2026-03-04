@@ -1,5 +1,36 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-03-04
+
+### Implemented
+
+- Added shared singleton daemon model for websocket mode:
+  - one daemon/runtime owns `BRIDGE_PORT` (default `37777`) and extension bridge,
+  - MCP client processes proxy stdio over daemon ingress (`MCP_DAEMON_PORT`, default `BRIDGE_PORT + 1`).
+- Added new startup orchestration modes:
+  - `MCP_DAEMON_MODE=auto|proxy|daemon|direct`.
+- Added daemon ingress server with:
+  - loopback-only `/mcp` WebSocket endpoint for proxy sessions,
+  - `/health` endpoint exposing runtime/bridge/proxy status.
+- Added per-external-client session mapping by binding one protocol session to each ingress WebSocket connection.
+- Added proxy server that forwards stdio JSON-RPC lines to daemon ingress and returns daemon responses back to stdout.
+- Added daemon idle shutdown support (`MCP_DAEMON_IDLE_TIMEOUT_MS`, default 15 minutes).
+- Added daemon state metadata file support (`MCP_DAEMON_STATE_PATH`) and bridge+1 ingress default documentation.
+- Added daemon-mode auth behavior:
+  - `MCP_AUTH_TOKEN=auto` is generated/reused by daemon runtime and persisted in daemon state metadata,
+  - proxy prints full token when auto-auth is requested and also reports redacted auth hints.
+- Added integration coverage for two concurrent MCP clients sharing one daemon/runtime with no second bridge bind.
+- Added config unit tests for daemon mode/port/timeout resolution.
+- Updated README with daemon model behavior, env configuration, and explicit examples.
+
+### Verification
+
+- `bun run test:unit` passed.
+- `bun run test:integration` passed.
+- `bun run test:fault` passed.
+- `bun run lint:spec` passed.
+- `bun run lint:compliance` passed.
+
 ## 2026-03-03
 
 ### Implemented

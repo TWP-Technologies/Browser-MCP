@@ -11,6 +11,7 @@
 ### 2.1 Core Features List
 
 - Multi-client MCP ingress with per-client `agent_session_id` (ASID) assignment and lifecycle tracking.
+- Shared singleton daemon ingress for multi-process MCP clients so one runtime owns the bridge bind and multiple stdio clients proxy concurrently.
 - Single shared browser-extension bridge over WebSocket using Bun `Bun.serve()`.
 - Tab lock orchestration that enforces one debugger owner per `tab_id` at any time.
 - Required tools: `list_available_tabs`, `attach_to_tab`, `detach_from_tab`.
@@ -24,6 +25,7 @@
 ### 2.2 User Journeys
 
 - User starts local MCP server -> app MUST bind to loopback interface and initialize ASID/session registries -> server is ready for concurrent MCP client connections.
+- User starts Codex MCP process while daemon already exists -> app MUST proxy stdio traffic to daemon ingress instead of trying to bind `BRIDGE_PORT` again -> second process starts successfully without bridge-port conflict.
 - User connects MCP Client A -> app MUST create ASID-A and open a logical routing channel -> Client A receives successful handshake metadata.
 - User connects MCP Client B -> app MUST create ASID-B without impacting ASID-A session state -> both clients remain active simultaneously.
 - User calls `list_available_tabs` -> app MUST query extension tab inventory and tab lock registry -> response contains `tab_id`, `url`, `title`, `is_locked_by_agent`, and current `locked_by_agent_session_id` when locked.
