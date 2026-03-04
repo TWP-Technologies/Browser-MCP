@@ -466,8 +466,7 @@ h2 {
 }
 
 .meta-copy-status {
-  display: block;
-  min-height: 14px;
+  display: none;
   margin-top: 4px;
   font-size: 10px;
   color: var(--ink-muted);
@@ -475,6 +474,7 @@ h2 {
 }
 
 .meta-copy-status--visible {
+  display: block;
   color: var(--accent-strong);
 }
 

@@ -260,7 +260,7 @@ function resolve_bridge_url_copy_status_label(): string {
     return "Clipboard unavailable";
   }
 
-  return "Click URL to copy";
+  return "";
 }
 
 function resolve_bridge_url_copy_button_label(): string {

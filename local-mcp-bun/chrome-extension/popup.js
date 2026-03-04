@@ -198,7 +198,7 @@ function resolve_bridge_url_copy_status_label() {
   if (bridge_url_copy_state === "failed") {
     return "Clipboard unavailable";
   }
-  return "Click URL to copy";
+  return "";
 }
 function resolve_bridge_url_copy_button_label() {
   return bridge_url_copy_state === "copied" ? "Copied" : "Copy";
