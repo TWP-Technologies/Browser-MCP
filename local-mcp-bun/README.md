@@ -79,10 +79,28 @@ You only need to set bridge env vars when overriding defaults (for example custo
   - `just package-server`
 - Build only extension zip:
   - `just package-extension`
+- Verify packaged extension zip integrity:
+  - `cd local-mcp-bun && bun run verify:release-extension -- --zip dist/release/v<version>/chrome-browser-mcp-chrome-extension-v<version>.zip`
 - Verify release version matches `package.json` and `chrome-extension/manifest.json`:
-  - `just package-version-check version=v0.2.0`
+  - `just package-version-check version=v0.2.1`
 
 Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SUMS.txt`.
+
+## Troubleshooting
+
+- Extension logs repeated `ERR_CONNECTION_REFUSED` for `ws://127.0.0.1:37777/extension`:
+  - Start the MCP server and verify daemon health: `curl http://127.0.0.1:37778/health`
+  - If using the packaged binary, force daemon mode once to confirm bind ownership:
+    - `MCP_DAEMON_MODE=daemon ./chrome-browser-mcp-v<version>-linux-x64`
+  - Confirm popup MCP port matches server `BRIDGE_PORT`.
+
+- Packaged extension fails with `Service worker registration failed ... fetching background.js`:
+  - Use release `v0.2.1` or newer. Packaging now includes transitive module imports required by `background.js`.
+
+- Windows Chrome with WSL server:
+  - Keep default loopback settings and run the server first.
+  - Validate server listener from Windows host before loading extension:
+    - `Invoke-WebRequest http://127.0.0.1:37778/health`
 
 ## Test
 

@@ -43,6 +43,11 @@ export interface daemon_run_options {
 const daemon_health_poll_interval_ms = 200;
 const daemon_health_request_timeout_ms = 750;
 
+interface daemon_spawn_target {
+  command: string;
+  args: string[];
+}
+
 function get_non_empty_string(input: string | undefined): string | undefined {
   if (!input) {
     return undefined;
@@ -202,6 +207,39 @@ async function wait_for_daemon_health(
   return undefined;
 }
 
+export function resolve_daemon_spawn_target(
+  exec_path: string,
+  argv: string[],
+  argv0: string | undefined,
+): daemon_spawn_target {
+  const script_or_bundle_entry = typeof argv[1] === "string" ? argv[1] : undefined;
+  const runtime_args = argv.slice(2);
+  const looks_like_bun_compiled_entry =
+    typeof script_or_bundle_entry === "string" &&
+    (script_or_bundle_entry.includes("/$bunfs/root/") || script_or_bundle_entry.includes("\\$bunfs\\root\\"));
+  const running_compiled_binary =
+    looks_like_bun_compiled_entry || (typeof argv0 === "string" && argv0.length > 0 && exec_path === argv0);
+
+  if (running_compiled_binary) {
+    return {
+      command: exec_path,
+      args: [...runtime_args],
+    };
+  }
+
+  if (script_or_bundle_entry && script_or_bundle_entry.length > 0) {
+    return {
+      command: exec_path,
+      args: [script_or_bundle_entry, ...runtime_args],
+    };
+  }
+
+  return {
+    command: exec_path,
+    args: argv.slice(1),
+  };
+}
+
 function spawn_detached_daemon_process(
   daemon_mode: daemon_run_options["daemon_mode"],
   env: Record<string, string | undefined>,
@@ -210,9 +248,8 @@ function spawn_detached_daemon_process(
     return;
   }
 
-  const command = process.argv[0];
-  const args = process.argv.slice(1);
-  const detached_process = spawn(command, args, {
+  const spawn_target = resolve_daemon_spawn_target(process.execPath, process.argv, process.argv0);
+  const detached_process = spawn(spawn_target.command, spawn_target.args, {
     detached: true,
     stdio: "ignore",
     env: {

@@ -1,6 +1,6 @@
 {
   "name": "@TWP-Technologies/Browser-MCP",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Local-only multiplexed Browser MCP server built with Bun",
@@ -20,7 +20,8 @@
     "lint:compliance": "bun run scripts/compliance_scan.ts",
     "ci:evidence": "bun run scripts/write_ci_evidence.ts",
     "release:check-version": "bun run scripts/check_release_version_sync.ts",
-    "package:release": "bun run scripts/package_release.ts"
+    "package:release": "bun run scripts/package_release.ts",
+    "verify:release-extension": "bun run scripts/verify_extension_release_zip.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

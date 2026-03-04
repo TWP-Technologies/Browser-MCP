@@ -4,6 +4,7 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFi
 import { basename, join, relative, resolve } from "node:path";
 import { zipSync } from "fflate";
 import { assert_release_version_sync, normalize_release_version } from "./check_release_version_sync";
+import { resolve_extension_stage_file_entries, validate_extension_bundle_entries } from "./extension_bundle_integrity";
 
 interface package_json_version {
   version?: string;
@@ -166,12 +167,34 @@ function collect_directory_files(directory_path: string): string[] {
 
 function copy_extension_release_files(project_root: string, stage_dir: string): void {
   const extension_root = resolve(project_root, "chrome-extension");
-  const selected_entries = ["manifest.json", "background.js", "popup.html", "popup.css", "popup.js", "assets", "README.md"];
+  const selected_entries = resolve_extension_stage_file_entries(extension_root);
 
   for (const entry of selected_entries) {
     const source_path = resolve(extension_root, entry);
     const destination_path = resolve(stage_dir, entry);
     cpSync(source_path, destination_path, { recursive: true, force: true });
+  }
+
+  const stage_validation = validate_extension_bundle_entries({
+    has_file: (relative_path) => {
+      const normalized_path = relative_path.replaceAll("\\", "/");
+      const absolute_path = resolve(stage_dir, normalized_path);
+      try {
+        return statSync(absolute_path).isFile();
+      } catch {
+        return false;
+      }
+    },
+    read_text: (relative_path) => readFileSync(resolve(stage_dir, relative_path), "utf8"),
+  });
+
+  if (stage_validation.errors.length > 0 || stage_validation.missing_files.length > 0) {
+    const message_lines = [
+      "[release] packaged extension stage is incomplete",
+      ...stage_validation.errors.map((entry) => `- ${entry}`),
+      ...stage_validation.missing_files.map((entry) => `- missing: ${entry}`),
+    ];
+    throw new Error(message_lines.join("\n"));
   }
 }
 

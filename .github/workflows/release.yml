@@ -82,6 +82,29 @@ jobs:
         run: bun run package:release -- --mode=server --version=${{ needs.resolve-version.outputs.version_tagged }} --clean
         working-directory: local-mcp-bun
 
+      - name: Smoke test packaged Linux binary (daemon mode)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_path="dist/release/v${{ needs.resolve-version.outputs.version_clean }}/chrome-browser-mcp-v${{ needs.resolve-version.outputs.version_clean }}-linux-x64"
+          MCP_DAEMON_MODE=daemon "${binary_path}" > /tmp/chrome-browser-mcp-daemon.log 2>&1 &
+          daemon_pid=$!
+          cleanup() {
+            kill "${daemon_pid}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 40); do
+            if curl --silent --fail http://127.0.0.1:37778/health >/tmp/chrome-browser-mcp-health.json; then
+              break
+            fi
+            sleep 0.25
+          done
+
+          curl --silent --fail http://127.0.0.1:37778/health | tee /tmp/chrome-browser-mcp-health-final.json >/dev/null
+        working-directory: local-mcp-bun
+
       - name: Upload server artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -109,6 +132,10 @@ jobs:
 
       - name: Package extension archive
         run: bun run package:release -- --mode=extension --version=${{ needs.resolve-version.outputs.version_tagged }} --clean
+        working-directory: local-mcp-bun
+
+      - name: Verify extension archive integrity
+        run: bun run verify:release-extension -- --zip dist/release/v${{ needs.resolve-version.outputs.version_clean }}/chrome-browser-mcp-chrome-extension-v${{ needs.resolve-version.outputs.version_clean }}.zip
         working-directory: local-mcp-bun
 
       - name: Upload extension artifacts
