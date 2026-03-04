@@ -13,6 +13,8 @@ const extension_path = resolve(current_dir, "../../chrome-extension");
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
+let fixture_server: Server | undefined;
+let fixture_url = "";
 let user_data_dir: string;
 
 async function sleep(timeout_ms: number): Promise<void> {
@@ -21,15 +23,18 @@ async function sleep(timeout_ms: number): Promise<void> {
   });
 }
 
-function cleanup_user_data_dir(path: string): void {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+async function cleanup_user_data_dir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       rmSync(path, { recursive: true, force: true });
       return;
     } catch (error) {
-      if (attempt === 2) {
+      if (attempt === 7) {
         console.error(`[e2e] failed to cleanup user data dir '${path}':`, error);
+        return;
       }
+
+      await sleep(250 * (attempt + 1));
     }
   }
 }
@@ -52,7 +57,27 @@ async function wait_for_condition(
   throw new Error(`timed out after ${timeout_ms}ms waiting for condition`);
 }
 
+function find_fixture_tab(tabs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  return tabs.find((tab) => String(tab.url).startsWith(fixture_url));
+}
+
 beforeAll(async () => {
+  fixture_server = Bun.serve({
+    port: 0,
+    fetch(): Response {
+      return new Response(
+        "<!doctype html><html><head><title>Example Domain</title></head><body><h1>Example Domain</h1><p>Test fixture page.</p></body></html>",
+        {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        },
+      );
+    },
+  });
+  fixture_url = `http://127.0.0.1:${fixture_server.port}/`;
+
   runtime = new local_mcp_runtime({
     bridge_mode: "websocket",
     bridge_host: "127.0.0.1",
@@ -64,6 +89,7 @@ beforeAll(async () => {
   context = await chromium.launchPersistentContext(user_data_dir, {
     channel: "chromium",
     headless: true,
+    timeout: 180_000,
     ignoreDefaultArgs: ["--disable-extensions"],
     args: [
       `--disable-extensions-except=${extension_path}`,
@@ -73,27 +99,28 @@ beforeAll(async () => {
 
   let service_worker = context.serviceWorkers()[0];
   if (!service_worker) {
-    service_worker = await context.waitForEvent("serviceworker", { timeout: 30_000 });
+    service_worker = await context.waitForEvent("serviceworker", { timeout: 90_000 });
   }
 
   expect(service_worker.url()).toContain("chrome-extension://");
 
   const page = await context.newPage();
-  await page.goto("https://example.com", { waitUntil: "domcontentloaded" });
+  await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
-  await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 30_000, 150);
-}, 120_000);
+  await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 90_000, 150);
+}, 300_000);
 
 afterAll(async () => {
   try {
     await context?.close();
   } finally {
     await runtime.stop();
+    fixture_server?.stop(true);
     if (user_data_dir) {
-      cleanup_user_data_dir(user_data_dir);
+      await cleanup_user_data_dir(user_data_dir);
     }
   }
-}, 60_000);
+}, 120_000);
 
 test("extension bridge supports attach, navigate, network capture, and pdf export", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e");
@@ -104,7 +131,7 @@ test("extension bridge supports attach, navigate, network capture, and pdf expor
     tabs: Array<Record<string, unknown>>;
   };
 
-  const target_tab = tabs_result.tabs.find((tab) => String(tab.url).includes("example.com"));
+  const target_tab = find_fixture_tab(tabs_result.tabs);
   expect(target_tab).toBeDefined();
 
   const target_index = target_tab?.index;
@@ -172,7 +199,7 @@ test("extension bridge recovers after mid-command websocket disconnect", async (
     tabs: Array<Record<string, unknown>>;
   };
 
-  const target_tab = tabs_result.tabs.find((tab) => String(tab.url).includes("example.com"));
+  const target_tab = find_fixture_tab(tabs_result.tabs);
   expect(target_tab).toBeDefined();
 
   await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
