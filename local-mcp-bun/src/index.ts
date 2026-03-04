@@ -1,6 +1,11 @@
-import { mcp_stdio_server } from "./mcp_stdio_server";
-import { resolve_auth_token, resolve_bridge_mode } from "./config";
-import { local_mcp_runtime } from "./runtime";
+import {
+  resolve_bridge_mode,
+  resolve_daemon_connect_timeout_ms,
+  resolve_daemon_idle_timeout_ms,
+  resolve_daemon_mode,
+  resolve_daemon_port,
+} from "./config";
+import { resolve_daemon_state_path, run_daemon_mode } from "./daemon_controller";
 
 function get_env_string(name: string): string | undefined {
   const value = process.env[name];
@@ -26,35 +31,30 @@ function parse_port(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
-  const bridge_mode = resolve_bridge_mode(process.env as Record<string, string | undefined>);
+  const env = process.env as Record<string, string | undefined>;
+  const bridge_mode = resolve_bridge_mode(env);
   const bridge_host = get_env_string("BRIDGE_HOST") ?? "127.0.0.1";
   const bridge_port = parse_port("BRIDGE_PORT", 37777);
-  const auth = resolve_auth_token(process.env as Record<string, string | undefined>);
+  const daemon_mode = resolve_daemon_mode(env, bridge_mode);
+  const daemon_host = get_env_string("MCP_DAEMON_HOST") ?? "127.0.0.1";
+  const daemon_port = resolve_daemon_port(env, bridge_port);
+  const daemon_idle_timeout_ms = resolve_daemon_idle_timeout_ms(env);
+  const daemon_connect_timeout_ms = resolve_daemon_connect_timeout_ms(env);
+  const daemon_state_path = resolve_daemon_state_path(env, daemon_port);
 
-  const runtime = new local_mcp_runtime({
-    bridge_mode,
-    bridge_host,
-    bridge_port,
-    auth_token: auth.auth_token,
-  });
-
-  if (auth.generated_automatically) {
-    console.error(`[auth] generated one-time MCP token for this server run: ${auth.auth_token}`);
-  }
-
-  const server = new mcp_stdio_server(runtime);
-  server.start();
-
-  process.on("SIGINT", () => {
-    runtime.stop().finally(() => {
-      process.exit(0);
-    });
-  });
-
-  process.on("SIGTERM", () => {
-    runtime.stop().finally(() => {
-      process.exit(0);
-    });
+  await run_daemon_mode({
+    daemon_mode,
+    daemon_host,
+    daemon_port,
+    daemon_idle_timeout_ms,
+    daemon_connect_timeout_ms,
+    daemon_state_path,
+    runtime_options: {
+      bridge_mode,
+      bridge_host,
+      bridge_port,
+    },
+    env,
   });
 }
 

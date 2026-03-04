@@ -12,6 +12,7 @@ function get_non_empty_string(input: string | undefined): string | undefined {
 }
 
 export type bridge_mode = "in_memory" | "websocket";
+export type daemon_mode = "auto" | "proxy" | "daemon" | "direct";
 
 export function is_loopback_host(host: string): boolean {
   const normalized = host.trim().toLowerCase();
@@ -70,4 +71,57 @@ export function resolve_bridge_mode(env: Record<string, string | undefined>): br
   }
 
   throw new Error(`BRIDGE_MODE must be either 'websocket' or 'in_memory', received '${configured}'`);
+}
+
+function parse_positive_integer(input: string | undefined, fallback: number): number {
+  const configured = get_non_empty_string(input);
+  if (!configured) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(configured, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+export function resolve_daemon_mode(
+  env: Record<string, string | undefined>,
+  resolved_bridge_mode: bridge_mode,
+): daemon_mode {
+  if (resolved_bridge_mode === "in_memory") {
+    return "direct";
+  }
+
+  const configured = get_non_empty_string(env.MCP_DAEMON_MODE);
+  if (!configured) {
+    return "auto";
+  }
+
+  const normalized = configured.toLowerCase();
+  if (normalized === "auto" || normalized === "proxy" || normalized === "daemon" || normalized === "direct") {
+    return normalized;
+  }
+
+  throw new Error(`MCP_DAEMON_MODE must be one of 'auto', 'proxy', 'daemon', or 'direct', received '${configured}'`);
+}
+
+export function resolve_daemon_port(env: Record<string, string | undefined>, bridge_port: number): number {
+  const fallback = bridge_port + 1;
+  const parsed = parse_positive_integer(env.MCP_DAEMON_PORT, fallback);
+  if (parsed > 65535) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+export function resolve_daemon_idle_timeout_ms(env: Record<string, string | undefined>): number {
+  return parse_positive_integer(env.MCP_DAEMON_IDLE_TIMEOUT_MS, 900_000);
+}
+
+export function resolve_daemon_connect_timeout_ms(env: Record<string, string | undefined>): number {
+  return parse_positive_integer(env.MCP_DAEMON_CONNECT_TIMEOUT_MS, 10_000);
 }
