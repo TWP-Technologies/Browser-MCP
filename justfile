@@ -18,7 +18,7 @@ bootstrap-linux:
 
 # Run MCP server using real websocket bridge and local loopback defaults.
 server:
-  cd {{project}} && BRIDGE_MODE=websocket BRIDGE_HOST=127.0.0.1 BRIDGE_PORT=37777 bun run src/index.ts
+  cd {{project}} && bun run src/index.ts
 
 # Run MCP server with in-memory bridge for quick local checks.
 server-in-memory:
@@ -26,7 +26,7 @@ server-in-memory:
 
 # Run MCP server with auto-generated one-time auth token.
 server-auth-auto:
-  cd {{project}} && BRIDGE_MODE=websocket BRIDGE_HOST=127.0.0.1 BRIDGE_PORT=37777 MCP_AUTH_TOKEN=auto bun run src/index.ts
+  cd {{project}} && MCP_AUTH_TOKEN=auto bun run src/index.ts
 
 lint:
   cd {{project}} && bun run lint:spec

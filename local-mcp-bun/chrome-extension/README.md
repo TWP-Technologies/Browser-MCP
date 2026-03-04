@@ -36,7 +36,8 @@ If you edit popup UI logic, run the build command before reloading the unpacked 
 
 ## Troubleshooting
 
-1. Start MCP server with websocket bridge enabled:
-   - `BRIDGE_MODE=websocket BRIDGE_HOST=127.0.0.1 BRIDGE_PORT=37777 bun run src/index.ts`
+1. Start MCP server (defaults are already websocket + `127.0.0.1:37777`):
+   - `bun run src/index.ts`
+   - Optional override example: `BRIDGE_PORT=38888 bun run src/index.ts`
 2. Confirm extension `bridge_url` is `ws://127.0.0.1:37777/extension`.
 3. Reload the extension once after server starts if reconnect did not occur within a few seconds.

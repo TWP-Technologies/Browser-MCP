@@ -19,8 +19,16 @@ This project provides a local-only MCP server that multiplexes multiple agent se
 bun run src/index.ts
 ```
 
+Default bridge runtime is:
+- `BRIDGE_MODE=websocket`
+- `BRIDGE_HOST=127.0.0.1`
+- `BRIDGE_PORT=37777`
+
+You only need to set bridge env vars when overriding defaults (for example custom port, host, or `BRIDGE_MODE=in_memory` test mode).
+
 ## Security Configuration
 
+- `BRIDGE_MODE` defaults to `websocket` and accepts only `websocket` or `in_memory`.
 - `BRIDGE_HOST` MUST be loopback-only (`127.x.x.x`, `localhost`, `::1`).
 - `MCP_AUTH_TOKEN=<value>` enables token auth with explicit value.
 - `MCP_AUTH_TOKEN=auto` or `MCP_AUTH_AUTO=1` enables token auth with auto-generated one-time token (printed at startup).
@@ -43,7 +51,7 @@ bun run src/index.ts
 - Build only extension zip:
   - `just package-extension`
 - Verify release version matches `package.json` and `chrome-extension/manifest.json`:
-  - `just package-version-check version=v0.1.0`
+  - `just package-version-check version=v0.1.1`
 
 Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SUMS.txt`.
 
