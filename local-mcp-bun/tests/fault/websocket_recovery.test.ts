@@ -184,3 +184,67 @@ test("websocket bridge rejects in-flight requests on disconnect and recovers aft
   second_extension.socket.close(1000, "test complete");
   await bridge.stop();
 });
+
+test("websocket bridge ignores stale socket errors after active reconnect", async () => {
+  const port = random_port();
+  const bridge = new websocket_bridge_transport("127.0.0.1", port);
+
+  const extension = await connect_fake_extension(port, {
+    respond_to_call_tool: true,
+    tabs: [
+      {
+        tab_id: 201,
+        url: "https://example.com",
+        title: "Example",
+        debugger_attached: false,
+      },
+    ],
+  });
+
+  await wait_for_condition(() => bridge.get_state() === "up");
+
+  (
+    bridge as unknown as {
+      handle_socket_error: (socket: unknown, error: Error) => void;
+    }
+  ).handle_socket_error({ stale: true }, new Error("stale socket error"));
+
+  expect(bridge.get_state()).toBe("up");
+
+  extension.socket.close(1000, "test complete");
+  await bridge.stop();
+});
+
+test("websocket bridge ignores stale socket close events after active reconnect", async () => {
+  const port = random_port();
+  const bridge = new websocket_bridge_transport("127.0.0.1", port);
+
+  const extension = await connect_fake_extension(port, {
+    respond_to_call_tool: true,
+    tabs: [
+      {
+        tab_id: 301,
+        url: "https://example.com",
+        title: "Example",
+        debugger_attached: false,
+      },
+    ],
+  });
+
+  await wait_for_condition(() => bridge.get_state() === "up");
+
+  (
+    bridge as unknown as {
+      handle_socket_close: (socket: unknown) => void;
+    }
+  ).handle_socket_close({ stale: true });
+
+  expect(bridge.get_state()).toBe("up");
+
+  const tabs = await bridge.list_tabs("agent-a");
+  expect(tabs.length).toBe(1);
+  expect(tabs[0]?.tab_id).toBe(301);
+
+  extension.socket.close(1000, "test complete");
+  await bridge.stop();
+});

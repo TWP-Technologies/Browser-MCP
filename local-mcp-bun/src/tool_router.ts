@@ -2,7 +2,14 @@ import { tool_error, to_tool_error } from "./errors";
 import { merge_tabs_with_locks, type bridge_transport } from "./bridge_transport";
 import { session_registry } from "./session_registry";
 import { tab_lock_manager } from "./tab_lock_manager";
-import type { attach_to_tab_input, detach_from_tab_input, listed_tab_snapshot } from "./types";
+import type {
+  attach_to_tab_input,
+  connections_snapshot,
+  detach_from_tab_input,
+  listed_tab_snapshot,
+  lock_snapshot,
+  ui_admin_request,
+} from "./types";
 
 interface router_options {
   auth_token?: string;
@@ -63,13 +70,21 @@ export class tool_router {
         return;
       }
 
-      void this.reconcile_locks_with_bridge("state_change_up");
+      void (async () => {
+        await this.reconcile_locks_with_bridge("state_change_up");
+        await this.publish_connections_snapshot("state_change_up");
+      })();
+    });
+
+    this.bridge_transport.set_on_ui_admin_request(async (request_id, action, payload) => {
+      return await this.handle_ui_admin_request(request_id, action, payload);
     });
   }
 
   public open_session(client_name?: string, supplied_token?: string): { agent_session_id: string } {
     const auth_mode = this.assert_token_if_required(supplied_token);
     const session = this.session_registry.create_session(client_name, auth_mode);
+    void this.publish_connections_snapshot("open_session");
     return { agent_session_id: session.agent_session_id };
   }
 
@@ -91,6 +106,7 @@ export class tool_router {
       }
     }
 
+    await this.publish_connections_snapshot("close_session");
     return { released_tab_ids };
   }
 
@@ -208,6 +224,7 @@ export class tool_router {
       }
     }
 
+    await this.publish_connections_snapshot("release_locks_for_session");
     return released_tab_ids;
   }
 
@@ -221,6 +238,7 @@ export class tool_router {
     }
 
     this.reconcile_in_progress = true;
+    let changed = false;
 
     try {
       const tabs = await this.bridge_transport.list_tabs(this.get_system_agent_session_id(reason));
@@ -244,6 +262,7 @@ export class tool_router {
         } catch {
           this.tab_lock_manager.release_lock(lock.tab_id);
         }
+        changed = true;
 
         try {
           this.session_registry.mark_tab_released(owner_agent_session_id, lock.tab_id);
@@ -259,6 +278,9 @@ export class tool_router {
       // Reconciliation is best-effort and retried automatically.
     } finally {
       this.reconcile_in_progress = false;
+      if (changed) {
+        await this.publish_connections_snapshot("reconcile_locks_with_bridge");
+      }
       void reason;
     }
   }
@@ -302,6 +324,7 @@ export class tool_router {
       this.tab_lock_manager.set_lock_state(input.tab_id, "attached");
       this.session_registry.mark_tab_owned(agent_session_id, input.tab_id);
       this.active_tab_by_session.set(agent_session_id, input.tab_id);
+      await this.publish_connections_snapshot("attach_to_tab");
 
       return {
         tab_id: input.tab_id,
@@ -359,6 +382,7 @@ export class tool_router {
     if (active_tab_id === input.tab_id) {
       this.active_tab_by_session.delete(agent_session_id);
     }
+    await this.publish_connections_snapshot("detach_from_tab");
 
     return {
       tab_id: input.tab_id,
@@ -427,6 +451,8 @@ export class tool_router {
     if (active_tab_id === tab_id) {
       this.active_tab_by_session.delete(owner_agent_session_id);
     }
+
+    void this.publish_connections_snapshot("detach_notice");
   }
 
   private async handle_browser_tabs(
@@ -563,6 +589,75 @@ export class tool_router {
     }
 
     throw new tool_error("INVALID_ARGUMENT", `unsupported browser_tabs action: ${action}`, false, { action });
+  }
+
+  private async handle_ui_admin_request(
+    _request_id: string,
+    action: ui_admin_request["action"],
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+    if (action !== "close_session") {
+      return {
+        ok: false,
+        error: `unsupported ui_admin_request action: ${action}`,
+      };
+    }
+
+    const agent_session_id = payload.agent_session_id;
+    if (typeof agent_session_id !== "string" || agent_session_id.length === 0) {
+      return {
+        ok: false,
+        error: "close_session requires non-empty agent_session_id",
+      };
+    }
+
+    try {
+      const result = await this.close_session(agent_session_id);
+      return {
+        ok: true,
+        result,
+      };
+    } catch (error) {
+      const mapped_error = to_tool_error(error);
+      return {
+        ok: false,
+        error: mapped_error.message,
+      };
+    }
+  }
+
+  private build_connections_snapshot(): connections_snapshot {
+    const sessions = this.session_registry.list_session_snapshots();
+    const locks: lock_snapshot[] = this.tab_lock_manager
+      .list_locks()
+      .map((lock) => ({
+        tab_id: lock.tab_id,
+        owner_agent_session_id: lock.owner_agent_session_id,
+        lock_state: lock.lock_state,
+        lock_acquired_at: lock.lock_acquired_at,
+      }))
+      .sort((left, right) => left.tab_id - right.tab_id);
+
+    return {
+      type: "connections_snapshot",
+      generated_at: new Date().toISOString(),
+      sessions,
+      locks,
+    };
+  }
+
+  private async publish_connections_snapshot(reason: string): Promise<void> {
+    if (this.bridge_transport.get_state() !== "up") {
+      return;
+    }
+
+    try {
+      await this.bridge_transport.publish_connections_snapshot(this.build_connections_snapshot());
+    } catch {
+      // Snapshot broadcast is best-effort.
+    } finally {
+      void reason;
+    }
   }
 
   private async call_tab_scoped_tool(

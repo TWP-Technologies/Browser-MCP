@@ -1,12 +1,21 @@
 import { tool_error } from "./errors";
 import type {
   bridge_state,
+  connections_snapshot,
   extension_inbound,
   extension_request,
   extension_response,
   listed_tab_snapshot,
+  ui_admin_request,
+  ui_admin_response,
   tab_snapshot,
 } from "./types";
+
+interface ui_admin_request_result {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
 
 export interface bridge_transport {
   get_state(): bridge_state;
@@ -21,6 +30,14 @@ export interface bridge_transport {
   ): Promise<unknown>;
   set_on_detach(handler: (tab_id: number, reason: string) => void): void;
   set_on_state_change(handler: (state: bridge_state) => void): void;
+  set_on_ui_admin_request(
+    handler: (
+      request_id: string,
+      action: ui_admin_request["action"],
+      payload: Record<string, unknown>,
+    ) => Promise<ui_admin_request_result>,
+  ): void;
+  publish_connections_snapshot(snapshot: connections_snapshot): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -42,11 +59,18 @@ export class in_memory_bridge_transport implements bridge_transport {
   private readonly request_log: extension_request[];
   private on_detach_handler?: (tab_id: number, reason: string) => void;
   private on_state_change_handler?: (state: bridge_state) => void;
+  private on_ui_admin_request_handler?: (
+    request_id: string,
+    action: ui_admin_request["action"],
+    payload: Record<string, unknown>,
+  ) => Promise<ui_admin_request_result>;
+  private last_connections_snapshot: connections_snapshot | null;
 
   public constructor() {
     this.state = "up";
     this.tabs_by_id = new Map<number, tab_snapshot>();
     this.request_log = [];
+    this.last_connections_snapshot = null;
   }
 
   public get_state(): bridge_state {
@@ -94,6 +118,47 @@ export class in_memory_bridge_transport implements bridge_transport {
 
   public clear_request_log_for_tests(): void {
     this.request_log.length = 0;
+  }
+
+  public get_last_connections_snapshot_for_tests(): connections_snapshot | null {
+    if (!this.last_connections_snapshot) {
+      return null;
+    }
+
+    return JSON.parse(JSON.stringify(this.last_connections_snapshot)) as connections_snapshot;
+  }
+
+  public async emit_ui_admin_request_for_tests(
+    action: ui_admin_request["action"],
+    payload: Record<string, unknown>,
+  ): Promise<ui_admin_response> {
+    const request_id = crypto.randomUUID();
+    if (!this.on_ui_admin_request_handler) {
+      return {
+        type: "ui_admin_response",
+        request_id,
+        ok: false,
+        error: "ui admin handler unavailable",
+      };
+    }
+
+    try {
+      const result = await this.on_ui_admin_request_handler(request_id, action, payload);
+      return {
+        type: "ui_admin_response",
+        request_id,
+        ok: result.ok,
+        result: result.result,
+        error: result.error,
+      };
+    } catch (error) {
+      return {
+        type: "ui_admin_response",
+        request_id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   public async list_tabs(agent_session_id: string): Promise<tab_snapshot[]> {
@@ -316,6 +381,20 @@ export class in_memory_bridge_transport implements bridge_transport {
     this.on_state_change_handler = handler;
   }
 
+  public set_on_ui_admin_request(
+    handler: (
+      request_id: string,
+      action: ui_admin_request["action"],
+      payload: Record<string, unknown>,
+    ) => Promise<ui_admin_request_result>,
+  ): void {
+    this.on_ui_admin_request_handler = handler;
+  }
+
+  public async publish_connections_snapshot(snapshot: connections_snapshot): Promise<void> {
+    this.last_connections_snapshot = JSON.parse(JSON.stringify(snapshot)) as connections_snapshot;
+  }
+
   public async stop(): Promise<void> {
     this.state = "down";
     this.on_state_change_handler?.(this.state);
@@ -363,6 +442,11 @@ export class websocket_bridge_transport implements bridge_transport {
   private readonly pending_requests: Map<string, pending_request>;
   private on_detach_handler?: (tab_id: number, reason: string) => void;
   private on_state_change_handler?: (state: bridge_state) => void;
+  private on_ui_admin_request_handler?: (
+    request_id: string,
+    action: ui_admin_request["action"],
+    payload: Record<string, unknown>,
+  ) => Promise<ui_admin_request_result>;
 
   public constructor(host: string, port: number, path = "/extension") {
     this.host = host;
@@ -380,7 +464,7 @@ export class websocket_bridge_transport implements bridge_transport {
         open: (socket) => this.handle_socket_open(socket),
         message: (socket, message) => this.handle_socket_message(socket, message),
         close: (socket) => this.handle_socket_close(socket),
-        error: (_socket, error) => this.handle_socket_error(error),
+        error: (socket, error) => this.handle_socket_error(socket, error),
       },
     });
   }
@@ -395,6 +479,24 @@ export class websocket_bridge_transport implements bridge_transport {
 
   public set_on_state_change(handler: (state: bridge_state) => void): void {
     this.on_state_change_handler = handler;
+  }
+
+  public set_on_ui_admin_request(
+    handler: (
+      request_id: string,
+      action: ui_admin_request["action"],
+      payload: Record<string, unknown>,
+    ) => Promise<ui_admin_request_result>,
+  ): void {
+    this.on_ui_admin_request_handler = handler;
+  }
+
+  public async publish_connections_snapshot(snapshot: connections_snapshot): Promise<void> {
+    if (!this.extension_socket || this.state !== "up") {
+      return;
+    }
+
+    this.extension_socket.send(JSON.stringify(snapshot));
   }
 
   public async list_tabs(agent_session_id: string): Promise<tab_snapshot[]> {
@@ -471,12 +573,13 @@ export class websocket_bridge_transport implements bridge_transport {
   }
 
   private handle_socket_open(socket: ServerWebSocket<ws_data>): void {
-    if (this.extension_socket) {
-      this.extension_socket.close(1013, "single extension connection required");
-    }
-
+    const previous_socket = this.extension_socket;
     this.extension_socket = socket;
     this.set_state("up");
+
+    if (previous_socket && previous_socket !== socket) {
+      previous_socket.close(1013, "single extension connection required");
+    }
   }
 
   private handle_socket_message(_socket: ServerWebSocket<ws_data>, raw_message: string | Buffer | Uint8Array): void {
@@ -504,6 +607,11 @@ export class websocket_bridge_transport implements bridge_transport {
       return;
     }
 
+    if ("type" in parsed && parsed.type === "ui_admin_request") {
+      void this.handle_ui_admin_request(parsed);
+      return;
+    }
+
     if ("request_id" in parsed && "ok" in parsed) {
       this.resolve_pending_response(parsed);
       return;
@@ -514,7 +622,11 @@ export class websocket_bridge_transport implements bridge_transport {
     }
   }
 
-  private handle_socket_close(_socket: ServerWebSocket<ws_data>): void {
+  private handle_socket_close(socket: ServerWebSocket<ws_data>): void {
+    if (!this.extension_socket || socket !== this.extension_socket) {
+      return;
+    }
+
     this.extension_socket = undefined;
     this.set_state("reconnecting");
 
@@ -526,8 +638,17 @@ export class websocket_bridge_transport implements bridge_transport {
     this.pending_requests.clear();
   }
 
-  private handle_socket_error(_error: Error): void {
-    this.set_state("down");
+  private handle_socket_error(socket: ServerWebSocket<ws_data>, _error: Error): void {
+    if (this.extension_socket && socket !== this.extension_socket) {
+      return;
+    }
+
+    if (!this.extension_socket) {
+      this.set_state("down");
+      return;
+    }
+
+    this.set_state("reconnecting");
   }
 
   private overwrite_tab_cache(tabs: tab_snapshot[]): void {
@@ -576,6 +697,42 @@ export class websocket_bridge_transport implements bridge_transport {
     return parsed_tabs;
   }
 
+  private async handle_ui_admin_request(request: ui_admin_request): Promise<void> {
+    let response: ui_admin_response;
+    if (!this.on_ui_admin_request_handler) {
+      response = {
+        type: "ui_admin_response",
+        request_id: request.request_id,
+        ok: false,
+        error: "ui admin handler unavailable",
+      };
+    } else {
+      try {
+        const result = await this.on_ui_admin_request_handler(request.request_id, request.action, request.payload);
+        response = {
+          type: "ui_admin_response",
+          request_id: request.request_id,
+          ok: result.ok,
+          result: result.result,
+          error: result.error,
+        };
+      } catch (error) {
+        response = {
+          type: "ui_admin_response",
+          request_id: request.request_id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    if (!this.extension_socket || this.state !== "up") {
+      return;
+    }
+
+    this.extension_socket.send(JSON.stringify(response));
+  }
+
   private resolve_pending_response(response: extension_response): void {
     const pending = this.pending_requests.get(response.request_id);
     if (!pending) {
@@ -622,9 +779,14 @@ export class websocket_bridge_transport implements bridge_transport {
     const request_id = crypto.randomUUID();
 
     return await new Promise<unknown>((resolve, reject) => {
+      const timeout_action =
+        action === "call_tool" && typeof payload.tool_name === "string"
+          ? `call_tool:${payload.tool_name}`
+          : action;
+
       const timeout_id = setTimeout(() => {
         this.pending_requests.delete(request_id);
-        reject(new tool_error("TIMEOUT", `extension request timed out: ${action}`, true));
+        reject(new tool_error("TIMEOUT", `extension request timed out: ${timeout_action}`, true));
       }, 30_000);
 
       this.pending_requests.set(request_id, {

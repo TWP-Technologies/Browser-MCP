@@ -31,3 +31,22 @@ test("session_registry throws SESSION_NOT_FOUND for unknown session", () => {
     expect(typed_error.code).toBe("SESSION_NOT_FOUND");
   }
 });
+
+test("session_registry emits stable snapshots with owned tabs", () => {
+  const registry = new session_registry();
+  const alpha = registry.create_session("alpha");
+  const beta = registry.create_session("beta");
+
+  registry.mark_tab_owned(alpha.agent_session_id, 202);
+  registry.mark_tab_owned(alpha.agent_session_id, 101);
+  registry.mark_tab_owned(beta.agent_session_id, 303);
+
+  const snapshots = registry.list_session_snapshots();
+  expect(snapshots.length).toBe(2);
+
+  const alpha_snapshot = snapshots.find((entry) => entry.agent_session_id === alpha.agent_session_id);
+  const beta_snapshot = snapshots.find((entry) => entry.agent_session_id === beta.agent_session_id);
+
+  expect(alpha_snapshot?.owned_tab_ids).toEqual([101, 202]);
+  expect(beta_snapshot?.owned_tab_ids).toEqual([303]);
+});

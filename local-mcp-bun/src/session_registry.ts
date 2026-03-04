@@ -1,6 +1,6 @@
 import { generate_agent_session_id, now_iso_string } from "./id";
 import { tool_error } from "./errors";
-import type { agent_session } from "./types";
+import type { agent_session, session_snapshot } from "./types";
 
 export class session_registry {
   private readonly sessions_by_id: Map<string, agent_session>;
@@ -73,5 +73,23 @@ export class session_registry {
 
   public list_active_sessions(): string[] {
     return [...this.sessions_by_id.keys()];
+  }
+
+  public list_session_snapshots(): session_snapshot[] {
+    const snapshots: session_snapshot[] = [];
+
+    for (const session of this.sessions_by_id.values()) {
+      snapshots.push({
+        agent_session_id: session.agent_session_id,
+        client_name: session.client_name,
+        connected_at: session.connected_at,
+        last_seen_at: session.last_seen_at,
+        state: session.state,
+        owned_tab_ids: [...session.owned_tab_ids].sort((left, right) => left - right),
+      });
+    }
+
+    snapshots.sort((left, right) => left.agent_session_id.localeCompare(right.agent_session_id));
+    return snapshots;
   }
 }

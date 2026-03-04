@@ -53,6 +53,29 @@ export interface tab_lock {
   lock_acquired_at: string;
 }
 
+export interface session_snapshot {
+  agent_session_id: string;
+  client_name?: string;
+  connected_at: string;
+  last_seen_at: string;
+  state: session_state;
+  owned_tab_ids: number[];
+}
+
+export interface lock_snapshot {
+  tab_id: number;
+  owner_agent_session_id: string;
+  lock_state: lock_state;
+  lock_acquired_at: string;
+}
+
+export interface connections_snapshot {
+  type: "connections_snapshot";
+  generated_at: string;
+  sessions: session_snapshot[];
+  locks: lock_snapshot[];
+}
+
 export interface attach_to_tab_input {
   tab_id: number;
   wait_timeout_ms?: number;
@@ -95,11 +118,27 @@ export interface extension_detach_notice {
   reason: string;
 }
 
+export interface ui_admin_request {
+  type: "ui_admin_request";
+  request_id: string;
+  action: "close_session";
+  payload: Record<string, unknown>;
+}
+
+export interface ui_admin_response {
+  type: "ui_admin_response";
+  request_id: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
 export type extension_inbound =
   | extension_response
   | extension_register
   | extension_tabs_update
-  | extension_detach_notice;
+  | extension_detach_notice
+  | ui_admin_request;
 
 export interface json_rpc_request {
   jsonrpc: "2.0";

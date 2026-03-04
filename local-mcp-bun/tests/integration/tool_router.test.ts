@@ -198,6 +198,54 @@ test("bridge request envelope preserves agent_session_id across concurrent sessi
   await runtime.stop();
 });
 
+test("tool_router publishes connections snapshots with sessions and locks", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  expect(bridge.get_last_connections_snapshot_for_tests()).toBe(null);
+
+  const session_id = runtime.tool_router.open_session("snapshot-agent").agent_session_id;
+  const after_open = bridge.get_last_connections_snapshot_for_tests();
+  expect(after_open?.sessions.some((session) => session.agent_session_id === session_id)).toBe(true);
+  expect(after_open?.locks.length).toBe(0);
+
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+  const after_attach = bridge.get_last_connections_snapshot_for_tests();
+  expect(after_attach?.locks.some((lock) => lock.tab_id === 101 && lock.owner_agent_session_id === session_id)).toBe(true);
+
+  await runtime.tool_router.call_tool(session_id, "detach_from_tab", { tab_id: 101 });
+  const after_detach = bridge.get_last_connections_snapshot_for_tests();
+  expect(after_detach?.locks.some((lock) => lock.tab_id === 101)).toBe(false);
+
+  await runtime.stop();
+});
+
+test("ui admin close_session releases locks and returns response", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const session_id = runtime.tool_router.open_session("admin-close").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const response = await bridge.emit_ui_admin_request_for_tests("close_session", {
+    agent_session_id: session_id,
+  });
+
+  expect(response.ok).toBe(true);
+  expect(runtime.session_registry.list_active_sessions().includes(session_id)).toBe(false);
+  expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
+
+  await runtime.stop();
+});
+
 test("runtime enforces loopback-only bridge host", () => {
   expect(
     () =>
