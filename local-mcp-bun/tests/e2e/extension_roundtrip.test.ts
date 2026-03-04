@@ -202,7 +202,7 @@ async function launch_context_via_cdp(executable_path: string): Promise<BrowserC
 
   await wait_for_condition(
     () => existsSync(devtools_port_file) || browser_process?.exitCode !== null,
-    90_000,
+    45_000,
     200,
   );
 
@@ -223,7 +223,7 @@ async function launch_context_via_cdp(executable_path: string): Promise<BrowserC
   }
 
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${devtools_port}`, {
-    timeout: 60_000,
+    timeout: 30_000,
   });
 
   const connected_context = browser.contexts()[0];
@@ -244,15 +244,19 @@ async function launch_extension_context(): Promise<BrowserContext> {
       persistent_attempts.push(
         {
           name: "playwright-channel-chromium-headless",
-          launch_options: { channel: "chromium", headless: true, timeout: 120_000 },
+          launch_options: { channel: "chromium", headless: true, timeout: 60_000 },
         },
         {
-          name: "playwright-channel-chromium-headed",
-          launch_options: { channel: "chromium", headless: false, timeout: 120_000 },
+          name: "playwright-channel-chrome-headless",
+          launch_options: { channel: "chrome", headless: true, timeout: 60_000 },
+        },
+        {
+          name: "playwright-channel-msedge-headless",
+          launch_options: { channel: "msedge", headless: true, timeout: 60_000 },
         },
         {
           name: "playwright-default-headless",
-          launch_options: { headless: true, timeout: 120_000 },
+          launch_options: { headless: true, timeout: 60_000 },
         },
       );
     } else {
@@ -328,7 +332,7 @@ beforeAll(async () => {
   await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
   await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 90_000, 150);
-}, 360_000);
+}, 600_000);
 
 afterAll(async () => {
   try {
