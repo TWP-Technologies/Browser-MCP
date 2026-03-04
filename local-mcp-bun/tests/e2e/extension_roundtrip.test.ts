@@ -900,6 +900,15 @@ test("extension popup controls connections, sessions, and bridge port", async ()
           toggle_button.click();
         });
 
+        if (!expected_bridge_up) {
+          await popup_page.evaluate(() => {
+            const disable_only_button = document.querySelector('button[data-action="disable-modal-disable-only"]');
+            if (disable_only_button instanceof HTMLButtonElement && !disable_only_button.disabled) {
+              disable_only_button.click();
+            }
+          });
+        }
+
         await wait_for_condition(() => (bridge.get_state() === "up") === expected_bridge_up, expected_bridge_up ? 45_000 : 30_000, 150);
 
         await wait_for_condition(
