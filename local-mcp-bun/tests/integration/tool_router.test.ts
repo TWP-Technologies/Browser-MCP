@@ -246,6 +246,70 @@ test("ui admin close_session releases locks and returns response", async () => {
   await runtime.stop();
 });
 
+test("ui admin close_all_sessions closes every active session", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const first_session_id = runtime.tool_router.open_session("admin-close-all-a").agent_session_id;
+  const second_session_id = runtime.tool_router.open_session("admin-close-all-b").agent_session_id;
+
+  await runtime.tool_router.call_tool(first_session_id, "attach_to_tab", { tab_id: 101 });
+  await runtime.tool_router.call_tool(second_session_id, "attach_to_tab", { tab_id: 102 });
+
+  const response = await bridge.emit_ui_admin_request_for_tests("close_all_sessions", {});
+
+  expect(response.ok).toBe(true);
+  const result = response.result as {
+    attempted_session_ids: string[];
+    closed_session_ids: string[];
+    failed: Array<{ agent_session_id: string; error: string }>;
+  };
+  expect(result.attempted_session_ids).toContain(first_session_id);
+  expect(result.attempted_session_ids).toContain(second_session_id);
+  expect(result.closed_session_ids).toContain(first_session_id);
+  expect(result.closed_session_ids).toContain(second_session_id);
+  expect(result.failed.length).toBe(0);
+  expect(runtime.session_registry.list_active_sessions().length).toBe(0);
+  expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
+  expect(runtime.tab_lock_manager.get_lock(102)).toBeUndefined();
+
+  await runtime.stop();
+});
+
+test("ui admin detach_tab_lock releases the owner lock", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const session_id = runtime.tool_router.open_session("admin-detach-lock").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const response = await bridge.emit_ui_admin_request_for_tests("detach_tab_lock", {
+    tab_id: 101,
+  });
+
+  expect(response.ok).toBe(true);
+  const result = response.result as {
+    tab_id: number;
+    detached: boolean;
+    lock_found: boolean;
+    owner_agent_session_id?: string;
+  };
+  expect(result.detached).toBe(true);
+  expect(result.lock_found).toBe(true);
+  expect(result.owner_agent_session_id).toBe(session_id);
+  expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
+
+  await runtime.stop();
+});
+
 test("runtime enforces loopback-only bridge host", () => {
   expect(
     () =>

@@ -121,7 +121,7 @@ export interface extension_detach_notice {
 export interface ui_admin_request {
   type: "ui_admin_request";
   request_id: string;
-  action: "close_session";
+  action: "close_session" | "close_all_sessions" | "detach_tab_lock";
   payload: Record<string, unknown>;
 }
 

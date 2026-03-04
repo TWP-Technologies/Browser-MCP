@@ -775,11 +775,26 @@ function register_ui_message_listener() {
       }
 
       if (message.type === "ui_detach_tab") {
-        await detach_from_tab(message.tab_id);
+        const tab_id = assert_tab_id(message.tab_id);
+        await send_ui_admin_request("detach_tab_lock", {
+          tab_id,
+        });
         await sync_tabs_snapshot();
         return {
           detached: true,
-          tab_id: message.tab_id,
+          tab_id,
+        };
+      }
+
+      if (message.type === "ui_detach_locked_tab") {
+        const tab_id = assert_tab_id(message.tab_id);
+        await send_ui_admin_request("detach_tab_lock", {
+          tab_id,
+        });
+        await sync_tabs_snapshot();
+        return {
+          detached: true,
+          tab_id,
         };
       }
 
@@ -793,6 +808,11 @@ function register_ui_message_listener() {
           agent_session_id,
         });
 
+        return result;
+      }
+
+      if (message.type === "ui_close_all_sessions") {
+        const result = await send_ui_admin_request("close_all_sessions", {});
         return result;
       }
 

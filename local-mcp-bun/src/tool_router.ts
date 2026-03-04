@@ -15,6 +15,15 @@ interface router_options {
   auth_token?: string;
 }
 
+interface close_all_sessions_result {
+  attempted_session_ids: string[];
+  closed_session_ids: string[];
+  failed: Array<{
+    agent_session_id: string;
+    error: string;
+  }>;
+}
+
 const passthrough_tools = [
   "browser_navigate",
   "browser_interact",
@@ -596,34 +605,110 @@ export class tool_router {
     action: ui_admin_request["action"],
     payload: Record<string, unknown>,
   ): Promise<{ ok: boolean; result?: unknown; error?: string }> {
-    if (action !== "close_session") {
-      return {
-        ok: false,
-        error: `unsupported ui_admin_request action: ${action}`,
-      };
+    if (action === "close_session") {
+      const agent_session_id = payload.agent_session_id;
+      if (typeof agent_session_id !== "string" || agent_session_id.length === 0) {
+        return {
+          ok: false,
+          error: "close_session requires non-empty agent_session_id",
+        };
+      }
+
+      try {
+        const result = await this.close_session(agent_session_id);
+        return {
+          ok: true,
+          result,
+        };
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        return {
+          ok: false,
+          error: mapped_error.message,
+        };
+      }
     }
 
-    const agent_session_id = payload.agent_session_id;
-    if (typeof agent_session_id !== "string" || agent_session_id.length === 0) {
-      return {
-        ok: false,
-        error: "close_session requires non-empty agent_session_id",
-      };
-    }
-
-    try {
-      const result = await this.close_session(agent_session_id);
+    if (action === "close_all_sessions") {
+      const result = await this.close_all_sessions_for_ui();
       return {
         ok: true,
         result,
       };
-    } catch (error) {
-      const mapped_error = to_tool_error(error);
-      return {
-        ok: false,
-        error: mapped_error.message,
-      };
     }
+
+    if (action === "detach_tab_lock") {
+      const tab_id = payload.tab_id;
+      if (typeof tab_id !== "number" || !Number.isInteger(tab_id) || tab_id <= 0) {
+        return {
+          ok: false,
+          error: "detach_tab_lock requires positive integer tab_id",
+        };
+      }
+
+      const active_lock = this.tab_lock_manager.get_lock(tab_id);
+      if (!active_lock) {
+        return {
+          ok: true,
+          result: {
+            tab_id,
+            detached: true,
+            lock_found: false,
+          },
+        };
+      }
+
+      try {
+        await this.detach_from_tab(active_lock.owner_agent_session_id, {
+          tab_id,
+        });
+        return {
+          ok: true,
+          result: {
+            tab_id,
+            detached: true,
+            lock_found: true,
+            owner_agent_session_id: active_lock.owner_agent_session_id,
+          },
+        };
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        return {
+          ok: false,
+          error: mapped_error.message,
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error: `unsupported ui_admin_request action: ${action}`,
+    };
+  }
+
+  private async close_all_sessions_for_ui(): Promise<close_all_sessions_result> {
+    const active_sessions = this.session_registry.list_active_sessions().sort((left, right) => left.localeCompare(right));
+    const closed_session_ids: string[] = [];
+    const failed: close_all_sessions_result["failed"] = [];
+
+    for (const agent_session_id of active_sessions) {
+      try {
+        await this.close_session(agent_session_id);
+        closed_session_ids.push(agent_session_id);
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        failed.push({
+          agent_session_id,
+          error: mapped_error.message,
+        });
+      }
+    }
+
+    return {
+      attempted_session_ids: active_sessions,
+      closed_session_ids,
+      failed,
+    };
   }
 
   private build_connections_snapshot(): connections_snapshot {
