@@ -814,7 +814,15 @@ test("extension popup controls connections, sessions, and bridge port", async ()
         toggle_button.click();
         toggle_button.click();
       });
-      await wait_for_condition(() => bridge.get_state() !== "up", 30_000, 150);
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+            return toggle_button instanceof HTMLButtonElement && !toggle_button.disabled;
+          }),
+        30_000,
+        150,
+      );
       await wait_for_condition(() => bridge.get_state() === "up", 45_000, 150);
     } finally {
       await popup_page.close();

@@ -30,11 +30,15 @@ let reconnect_failure_started_at_ms = 0;
 let reconnect_failure_count = 0;
 let last_transient_failure_log_at_ms = 0;
 let last_persistent_failure_log_at_ms = 0;
+let last_waiting_hint_log_at_ms = 0;
 let fallback_reconnect_timer = null;
 let reconnect_scheduler_fault_logged = false;
 let next_reconnect_attempt_at_ms = null;
 let last_poll_attempt_at_ms = null;
 let poll_attempt_serial = 0;
+let last_connect_failure_reason = null;
+let last_connect_failure_details = null;
+let last_connect_failure_at_ms = null;
 let latest_tabs_snapshot = [];
 let latest_connections_snapshot = {
   type: "connections_snapshot",
@@ -56,6 +60,7 @@ const connect_attempt_lifecycle = new socket_attempt_lifecycle();
 const transient_failure_log_interval_ms = 5000;
 const persistent_failure_error_threshold_ms = 60000;
 const persistent_failure_log_interval_ms = 300000;
+const waiting_hint_log_interval_ms = 60000;
 const ui_admin_request_timeout_ms = 10000;
 
 function log(...args) {
@@ -278,6 +283,45 @@ function reset_reconnect_failures() {
   reconnect_failure_count = 0;
   last_transient_failure_log_at_ms = 0;
   last_persistent_failure_log_at_ms = 0;
+  last_waiting_hint_log_at_ms = 0;
+}
+
+function clear_connect_failure_telemetry() {
+  last_connect_failure_reason = null;
+  last_connect_failure_details = null;
+  last_connect_failure_at_ms = null;
+}
+
+function set_connect_failure_telemetry(reason, details = "") {
+  last_connect_failure_reason = reason;
+  last_connect_failure_details = details;
+  last_connect_failure_at_ms = Date.now();
+}
+
+function resolve_waiting_connection_hint() {
+  if (!extension_enabled || bridge_connection_state === "open") {
+    return "";
+  }
+
+  if (last_connect_failure_reason === "socket_error") {
+    return `Waiting for bridge listener at ${bridge_url}. Start MCP server and confirm port ${mcp_port}.`;
+  }
+
+  if (last_connect_failure_reason === "socket_close") {
+    return `Bridge dropped (${last_connect_failure_details || "unexpected close"}); reconnecting to ${bridge_url}.`;
+  }
+
+  return `Waiting for bridge listener at ${bridge_url}.`;
+}
+
+function maybe_log_waiting_bridge_hint() {
+  const now_ms = Date.now();
+  if (now_ms - last_waiting_hint_log_at_ms < waiting_hint_log_interval_ms) {
+    return;
+  }
+
+  last_waiting_hint_log_at_ms = now_ms;
+  log_warn(`waiting for bridge listener at ${bridge_url}; ensure MCP server is running and BRIDGE_PORT=${mcp_port}`);
 }
 
 function clear_fallback_reconnect_timer() {
@@ -310,6 +354,7 @@ function notify_ui_state_change() {
 }
 
 function record_reconnect_failure(reason, details = "") {
+  set_connect_failure_telemetry(reason, details);
   const now_ms = Date.now();
   if (reconnect_failure_started_at_ms === 0) {
     reconnect_failure_started_at_ms = now_ms;
@@ -328,6 +373,7 @@ function record_reconnect_failure(reason, details = "") {
     log_error(
       `bridge reconnect still failing after ${failure_duration_ms}ms; failures=${reconnect_failure_count}; reason=${reason}${detail_suffix}`,
     );
+    maybe_log_waiting_bridge_hint();
     return;
   }
 
@@ -337,6 +383,7 @@ function record_reconnect_failure(reason, details = "") {
 
   last_transient_failure_log_at_ms = now_ms;
   log_warn(`bridge reconnect pending; failures=${reconnect_failure_count}; reason=${reason}${detail_suffix}`);
+  maybe_log_waiting_bridge_hint();
 }
 
 function schedule_bridge_reconnect(reason) {
@@ -452,6 +499,7 @@ function connect_bridge(reason = "manual") {
     clear_fallback_reconnect_timer();
     reconnect_scheduler_fault_logged = false;
     reset_reconnect_failures();
+    clear_connect_failure_telemetry();
     log("bridge connected", bridge_url);
     send_json({
       type: "register",
@@ -498,6 +546,7 @@ function disconnect_bridge(reason = "manual_disconnect") {
   clear_reconnect_poll_telemetry();
   clear_pending_ui_admin_requests(reason);
   stop_heartbeat();
+  clear_connect_failure_telemetry();
 
   const socket = bridge_socket;
   bridge_socket = null;
@@ -626,6 +675,10 @@ async function get_ui_state() {
     next_reconnect_attempt_at_ms,
     last_poll_attempt_at_ms,
     poll_attempt_serial,
+    last_connect_failure_reason,
+    last_connect_failure_details,
+    last_connect_failure_at_ms,
+    connection_hint: resolve_waiting_connection_hint(),
     bridge_url,
     mcp_port,
     tabs: latest_tabs_snapshot,

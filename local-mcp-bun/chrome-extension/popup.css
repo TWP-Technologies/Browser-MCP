@@ -255,6 +255,17 @@ h2 {
   gap: 6px;
 }
 
+.bridge-hint {
+  margin: 6px 0 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.bridge-hint--hidden {
+  display: none;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;

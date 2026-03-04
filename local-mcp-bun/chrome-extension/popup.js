@@ -120,6 +120,16 @@ function describe_poll_schedule(next_reconnect_attempt_at_ms) {
   }
   return `Polling in ${remaining_seconds}s`;
 }
+function resolve_waiting_hint(state, mode) {
+  if (!state || mode !== "waiting") {
+    return "";
+  }
+  const explicit_hint = typeof state.connection_hint === "string" ? state.connection_hint.trim() : "";
+  if (explicit_hint.length > 0) {
+    return explicit_hint;
+  }
+  return `Waiting for MCP bridge on port ${state.mcp_port}.`;
+}
 function is_interaction_guard_active() {
   return Date.now() < interaction_guard_until_ms;
 }
@@ -383,7 +393,11 @@ async function drain_toggle_queue() {
     return;
   }
   toggle_in_flight = true;
-  render();
+  globalThis.queueMicrotask(() => {
+    if (toggle_in_flight) {
+      render();
+    }
+  });
   try {
     while (queued_toggle_target_enabled !== null) {
       const target_enabled = queued_toggle_target_enabled;
@@ -549,6 +563,7 @@ function render() {
   const toggle_button_class = toggle_reference_enabled ? "btn--danger" : "btn--primary";
   const bridge_state_label = describe_bridge_state(bridge_mode);
   const waiting_poll_label = describe_poll_schedule(ui_state?.next_reconnect_attempt_at_ms);
+  const waiting_hint_label = resolve_waiting_hint(ui_state, bridge_mode);
   const bridge_url_copy_button_label = resolve_bridge_url_copy_button_label();
   const bridge_url_copy_status_label = resolve_bridge_url_copy_status_label();
   app_root.innerHTML = `
@@ -594,6 +609,10 @@ function render() {
             Snapshot ${escape_html(format_snapshot_badge_timestamp(generated_at))}
           </span>
         </div>
+        <p
+          class="bridge-hint ${bridge_mode === "waiting" && waiting_hint_label.length > 0 ? "" : "bridge-hint--hidden"}"
+          data-testid="bridge-hint"
+        >${escape_html(waiting_hint_label)}</p>
 
         <dl class="meta-strip">
           <div class="meta-item meta-item--url">

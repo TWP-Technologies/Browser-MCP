@@ -33,6 +33,7 @@ If you edit popup UI logic, run the build command before reloading the unpacked 
 - The extension retries `ws://127.0.0.1:37777/extension` with bounded reconnect backoff when the MCP server is offline.
 - Transient startup failures (`ERR_CONNECTION_REFUSED`) are expected when the server is not running yet.
 - Reconnect attempts are single-flight and capped to avoid resource churn.
+- Popup status includes waiting diagnostics with reconnect countdown and bridge listener hints.
 
 ## Troubleshooting
 
@@ -40,4 +41,6 @@ If you edit popup UI logic, run the build command before reloading the unpacked 
    - `bun run src/index.ts`
    - Optional override example: `BRIDGE_PORT=38888 bun run src/index.ts`
 2. Confirm extension `bridge_url` is `ws://127.0.0.1:37777/extension`.
-3. Reload the extension once after server starts if reconnect did not occur within a few seconds.
+3. Verify daemon health endpoint from the same host as Chrome:
+   - `curl http://127.0.0.1:37778/health`
+4. If using a packaged extension zip, use release `v0.2.1` or newer. Earlier zips may fail service-worker registration due to missing module files imported by `background.js`.
