@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
+    "build:popup-ui": "bun build ./chrome-extension/popup.ts --target=browser --format=esm --outfile ./chrome-extension/popup.js",
+    "check:popup-ui": "bunx tsc -p ./chrome-extension/tsconfig.popup.json --noEmit",
     "test": "bun test",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",

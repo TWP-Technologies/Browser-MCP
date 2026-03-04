@@ -1,7 +1,13 @@
 // Modified by [KnotFalse]
 
+import { reconnect_scheduler } from "./reconnect_scheduler.js";
+import { socket_attempt_lifecycle } from "./socket_attempt_lifecycle.js";
+
 const extension_id = chrome.runtime.id;
 const default_bridge_url = "ws://127.0.0.1:37777/extension";
+const default_mcp_port = 37777;
+const min_port = 1;
+const max_port = 65535;
 
 /** @type {Set<number>} */
 const attached_tab_ids = new Set();
@@ -14,9 +20,53 @@ const network_requests_by_tab = new Map();
 
 let bridge_socket = null;
 let bridge_url = default_bridge_url;
+let mcp_port = default_mcp_port;
+let extension_enabled = true;
 let heartbeat_timer = null;
+let bridge_connection_state = "idle";
+let bridge_socket_generation = 0;
+let allow_immediate_reconnect = false;
+let reconnect_failure_started_at_ms = 0;
+let reconnect_failure_count = 0;
+let last_transient_failure_log_at_ms = 0;
+let last_persistent_failure_log_at_ms = 0;
+let fallback_reconnect_timer = null;
+let reconnect_scheduler_fault_logged = false;
+let next_reconnect_attempt_at_ms = null;
+let last_poll_attempt_at_ms = null;
+let poll_attempt_serial = 0;
+let latest_tabs_snapshot = [];
+let latest_connections_snapshot = {
+  type: "connections_snapshot",
+  generated_at: now(),
+  sessions: [],
+  locks: [],
+};
+
+/** @type {Map<string, {resolve: (value: any) => void, reject: (reason: any) => void, timeout_id: number}>} */
+const pending_ui_admin_requests = new Map();
+
+const reconnect_policy = new reconnect_scheduler({
+  base_delay_ms: 1000,
+  max_delay_ms: 15000,
+  jitter_ratio: 0.2,
+});
+const connect_attempt_lifecycle = new socket_attempt_lifecycle();
+
+const transient_failure_log_interval_ms = 5000;
+const persistent_failure_error_threshold_ms = 60000;
+const persistent_failure_log_interval_ms = 300000;
+const ui_admin_request_timeout_ms = 10000;
 
 function log(...args) {
+  console.info("[local-mcp-bun-extension]", ...args);
+}
+
+function log_warn(...args) {
+  console.warn("[local-mcp-bun-extension]", ...args);
+}
+
+function log_error(...args) {
   console.error("[local-mcp-bun-extension]", ...args);
 }
 
@@ -24,12 +74,48 @@ function now() {
   return new Date().toISOString();
 }
 
+function build_bridge_url(port) {
+  return `ws://127.0.0.1:${port}/extension`;
+}
+
+function parse_valid_port(input) {
+  if (typeof input !== "number" || !Number.isInteger(input)) {
+    return null;
+  }
+
+  if (input < min_port || input > max_port) {
+    return null;
+  }
+
+  return input;
+}
+
+function parse_port_from_bridge_url(candidate_url) {
+  if (typeof candidate_url !== "string") {
+    return null;
+  }
+
+  const match = /^ws:\/\/127\.0\.0\.1:(\d{1,5})\/extension$/.exec(candidate_url);
+  if (!match) {
+    return null;
+  }
+
+  return parse_valid_port(Number.parseInt(match[1], 10));
+}
+
 async function init() {
-  await hydrate_bridge_url();
-  connect_bridge();
+  await hydrate_bridge_config();
   register_runtime_listeners();
   register_debugger_detach_listener();
   register_debugger_event_listener();
+  register_ui_message_listener();
+
+  if (extension_enabled) {
+    connect_bridge("init");
+  } else {
+    bridge_connection_state = "idle";
+    log("bridge autoconnect disabled by user preference");
+  }
 
   chrome.alarms.create("bridge-heartbeat", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((alarm) => {
@@ -37,13 +123,17 @@ async function init() {
       return;
     }
 
+    if (!extension_enabled) {
+      return;
+    }
+
     if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN) {
-      connect_bridge();
+      schedule_bridge_reconnect("alarm");
       return;
     }
 
     send_tabs_update().catch((error) => {
-      log("tabs update failed", error);
+      log_warn("tabs update failed", error);
     });
   });
 }
@@ -160,23 +250,208 @@ function register_debugger_event_listener() {
   });
 }
 
-async function hydrate_bridge_url() {
-  const result = await chrome.storage.local.get(["bridge_url"]);
-  if (typeof result.bridge_url === "string" && result.bridge_url.startsWith("ws://127.0.0.1")) {
-    bridge_url = result.bridge_url;
+async function hydrate_bridge_config() {
+  const result = await chrome.storage.local.get(["bridge_url", "mcp_port", "extension_enabled"]);
+
+  if (typeof result.extension_enabled === "boolean") {
+    extension_enabled = result.extension_enabled;
   }
+
+  const stored_port_candidate =
+    typeof result.mcp_port === "number"
+      ? result.mcp_port
+      : typeof result.mcp_port === "string"
+        ? Number.parseInt(result.mcp_port, 10)
+        : NaN;
+  const port_from_storage = parse_valid_port(stored_port_candidate);
+  const port_from_url = parse_port_from_bridge_url(result.bridge_url);
+  mcp_port = port_from_storage ?? port_from_url ?? default_mcp_port;
+  bridge_url = build_bridge_url(mcp_port);
 }
 
-function connect_bridge() {
-  try {
-    bridge_socket?.close();
-  } catch {
-    // noop
+function is_socket_active(socket, socket_generation) {
+  return bridge_socket === socket && bridge_socket_generation === socket_generation;
+}
+
+function reset_reconnect_failures() {
+  reconnect_failure_started_at_ms = 0;
+  reconnect_failure_count = 0;
+  last_transient_failure_log_at_ms = 0;
+  last_persistent_failure_log_at_ms = 0;
+}
+
+function clear_fallback_reconnect_timer() {
+  if (fallback_reconnect_timer === null) {
+    return false;
   }
 
-  bridge_socket = new WebSocket(bridge_url);
+  globalThis.clearTimeout(fallback_reconnect_timer);
+  fallback_reconnect_timer = null;
+  return true;
+}
 
-  bridge_socket.addEventListener("open", () => {
+function clear_pending_ui_admin_requests(reason = "bridge unavailable") {
+  for (const pending of pending_ui_admin_requests.values()) {
+    globalThis.clearTimeout(pending.timeout_id);
+    pending.reject(new Error(reason));
+  }
+
+  pending_ui_admin_requests.clear();
+}
+
+function clear_reconnect_poll_telemetry() {
+  next_reconnect_attempt_at_ms = null;
+}
+
+function notify_ui_state_change() {
+  chrome.runtime.sendMessage({ type: "ui_state_changed" }).catch(() => {
+    // Popup may not be open.
+  });
+}
+
+function record_reconnect_failure(reason, details = "") {
+  const now_ms = Date.now();
+  if (reconnect_failure_started_at_ms === 0) {
+    reconnect_failure_started_at_ms = now_ms;
+  }
+
+  reconnect_failure_count += 1;
+  const failure_duration_ms = now_ms - reconnect_failure_started_at_ms;
+  const detail_suffix = details.length > 0 ? ` (${details})` : "";
+
+  if (failure_duration_ms >= persistent_failure_error_threshold_ms) {
+    if (now_ms - last_persistent_failure_log_at_ms < persistent_failure_log_interval_ms) {
+      return;
+    }
+
+    last_persistent_failure_log_at_ms = now_ms;
+    log_error(
+      `bridge reconnect still failing after ${failure_duration_ms}ms; failures=${reconnect_failure_count}; reason=${reason}${detail_suffix}`,
+    );
+    return;
+  }
+
+  if (now_ms - last_transient_failure_log_at_ms < transient_failure_log_interval_ms) {
+    return;
+  }
+
+  last_transient_failure_log_at_ms = now_ms;
+  log_warn(`bridge reconnect pending; failures=${reconnect_failure_count}; reason=${reason}${detail_suffix}`);
+}
+
+function schedule_bridge_reconnect(reason) {
+  if (!extension_enabled) {
+    return;
+  }
+
+  if (bridge_connection_state === "open") {
+    return;
+  }
+
+  let scheduled;
+  try {
+    scheduled = reconnect_policy.schedule(() => {
+      connect_bridge(`reconnect:${reason}`);
+    });
+  } catch (error) {
+    if (!reconnect_scheduler_fault_logged) {
+      reconnect_scheduler_fault_logged = true;
+      log_error("reconnect scheduler failed; using fallback timer", error);
+    }
+
+    if (fallback_reconnect_timer !== null) {
+      return;
+    }
+
+    fallback_reconnect_timer = globalThis.setTimeout(() => {
+      fallback_reconnect_timer = null;
+      if (bridge_connection_state !== "open") {
+        connect_bridge(`fallback:${reason}`);
+      }
+    }, 1000);
+    next_reconnect_attempt_at_ms = Date.now() + 1000;
+    notify_ui_state_change();
+    return;
+  }
+
+  if (!scheduled.scheduled) {
+    return;
+  }
+
+  clear_fallback_reconnect_timer();
+  next_reconnect_attempt_at_ms = Date.now() + scheduled.delay_ms;
+  notify_ui_state_change();
+  log(`bridge reconnect scheduled in ${scheduled.delay_ms}ms (attempt=${scheduled.attempt}, reason=${reason})`);
+}
+
+function finalize_socket_failure(socket, socket_generation, reason, details = "") {
+  if (!is_socket_active(socket, socket_generation)) {
+    return false;
+  }
+
+  if (!connect_attempt_lifecycle.claim_terminal(socket_generation)) {
+    return false;
+  }
+
+  stop_heartbeat();
+  bridge_socket = null;
+  bridge_connection_state = "idle";
+  clear_pending_ui_admin_requests("extension bridge disconnected");
+
+  if (!extension_enabled) {
+    notify_ui_state_change();
+    return true;
+  }
+
+  record_reconnect_failure(reason, details);
+
+  if (allow_immediate_reconnect) {
+    allow_immediate_reconnect = false;
+    connect_bridge(`${reason}_immediate`);
+  }
+
+  schedule_bridge_reconnect(reason);
+  notify_ui_state_change();
+  return true;
+}
+
+function connect_bridge(reason = "manual") {
+  if (!extension_enabled) {
+    return false;
+  }
+
+  if (bridge_connection_state === "connecting") {
+    return false;
+  }
+
+  if (bridge_socket && (bridge_socket.readyState === WebSocket.OPEN || bridge_socket.readyState === WebSocket.CONNECTING)) {
+    return false;
+  }
+
+  bridge_connection_state = "connecting";
+  clear_reconnect_poll_telemetry();
+  last_poll_attempt_at_ms = Date.now();
+  poll_attempt_serial += 1;
+  bridge_socket_generation += 1;
+  const socket_generation = bridge_socket_generation;
+  connect_attempt_lifecycle.begin(socket_generation);
+  const socket = new WebSocket(bridge_url);
+  bridge_socket = socket;
+
+  log(`bridge connecting ${bridge_url} (reason=${reason})`);
+  notify_ui_state_change();
+
+  socket.addEventListener("open", () => {
+    if (!is_socket_active(socket, socket_generation)) {
+      return;
+    }
+
+    bridge_connection_state = "open";
+    allow_immediate_reconnect = true;
+    reconnect_policy.reset();
+    clear_fallback_reconnect_timer();
+    reconnect_scheduler_fault_logged = false;
+    reset_reconnect_failures();
     log("bridge connected", bridge_url);
     send_json({
       type: "register",
@@ -185,26 +460,305 @@ function connect_bridge() {
     });
 
     send_tabs_update().catch((error) => {
-      log("tabs update on open failed", error);
+      log_warn("tabs update on open failed", error);
     });
 
     start_heartbeat();
+    notify_ui_state_change();
   });
 
-  bridge_socket.addEventListener("message", (event) => {
+  socket.addEventListener("message", (event) => {
+    if (!is_socket_active(socket, socket_generation)) {
+      return;
+    }
+
     handle_bridge_message(event.data).catch((error) => {
-      log("bridge message handler failed", error);
+      log_error("bridge message handler failed", error);
     });
   });
 
-  bridge_socket.addEventListener("close", () => {
-    stop_heartbeat();
-    setTimeout(() => connect_bridge(), 2000);
+  socket.addEventListener("close", (event) => {
+    finalize_socket_failure(socket, socket_generation, "socket_close", `code=${event.code}; reason=${event.reason || "none"}`);
   });
 
-  bridge_socket.addEventListener("error", () => {
-    stop_heartbeat();
-    setTimeout(() => connect_bridge(), 2000);
+  socket.addEventListener("error", () => {
+    finalize_socket_failure(socket, socket_generation, "socket_error");
+  });
+
+  return true;
+}
+
+function disconnect_bridge(reason = "manual_disconnect") {
+  clear_fallback_reconnect_timer();
+  reconnect_policy.reset();
+  reset_reconnect_failures();
+  connect_attempt_lifecycle.clear();
+  allow_immediate_reconnect = false;
+  bridge_connection_state = "idle";
+  clear_reconnect_poll_telemetry();
+  clear_pending_ui_admin_requests(reason);
+  stop_heartbeat();
+
+  const socket = bridge_socket;
+  bridge_socket = null;
+
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    try {
+      socket.close(1000, reason);
+    } catch {
+      // Best-effort close.
+    }
+  }
+
+  notify_ui_state_change();
+}
+
+function normalize_connections_snapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return {
+      type: "connections_snapshot",
+      generated_at: now(),
+      sessions: [],
+      locks: [],
+    };
+  }
+
+  const sessions = Array.isArray(snapshot.sessions)
+    ? snapshot.sessions
+        .filter((session) => session && typeof session.agent_session_id === "string")
+        .map((session) => ({
+          agent_session_id: String(session.agent_session_id),
+          client_name: typeof session.client_name === "string" ? session.client_name : undefined,
+          connected_at: typeof session.connected_at === "string" ? session.connected_at : "",
+          last_seen_at: typeof session.last_seen_at === "string" ? session.last_seen_at : "",
+          state: typeof session.state === "string" ? session.state : "connected",
+          owned_tab_ids: Array.isArray(session.owned_tab_ids)
+            ? session.owned_tab_ids.filter((tab_id) => typeof tab_id === "number")
+            : [],
+        }))
+    : [];
+
+  const locks = Array.isArray(snapshot.locks)
+    ? snapshot.locks
+        .filter((lock) => lock && typeof lock.tab_id === "number" && typeof lock.owner_agent_session_id === "string")
+        .map((lock) => ({
+          tab_id: Number(lock.tab_id),
+          owner_agent_session_id: String(lock.owner_agent_session_id),
+          lock_state: typeof lock.lock_state === "string" ? lock.lock_state : "attached",
+          lock_acquired_at: typeof lock.lock_acquired_at === "string" ? lock.lock_acquired_at : "",
+        }))
+    : [];
+
+  return {
+    type: "connections_snapshot",
+    generated_at: typeof snapshot.generated_at === "string" ? snapshot.generated_at : now(),
+    sessions,
+    locks,
+  };
+}
+
+function resolve_ui_admin_response(response) {
+  const request_id = response?.request_id;
+  if (typeof request_id !== "string") {
+    return;
+  }
+
+  const pending = pending_ui_admin_requests.get(request_id);
+  if (!pending) {
+    return;
+  }
+
+  pending_ui_admin_requests.delete(request_id);
+  globalThis.clearTimeout(pending.timeout_id);
+
+  if (response.ok !== true) {
+    pending.reject(new Error(typeof response.error === "string" ? response.error : "ui admin request failed"));
+    return;
+  }
+
+  pending.resolve(response.result);
+}
+
+async function send_ui_admin_request(action, payload) {
+  if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
+    throw new Error("extension bridge is not connected");
+  }
+
+  const request_id = crypto.randomUUID();
+  return await new Promise((resolve, reject) => {
+    const timeout_id = globalThis.setTimeout(() => {
+      pending_ui_admin_requests.delete(request_id);
+      reject(new Error(`ui admin request timed out: ${action}`));
+    }, ui_admin_request_timeout_ms);
+
+    pending_ui_admin_requests.set(request_id, {
+      resolve,
+      reject,
+      timeout_id,
+    });
+
+    send_json({
+      type: "ui_admin_request",
+      request_id,
+      action,
+      payload,
+    });
+  });
+}
+
+async function sync_tabs_snapshot(send_update = true) {
+  const tabs = await get_tabs_snapshot();
+  latest_tabs_snapshot = tabs;
+
+  if (send_update) {
+    send_json({ type: "tabs_update", tabs });
+    notify_ui_state_change();
+  }
+
+  return tabs;
+}
+
+async function get_ui_state() {
+  await sync_tabs_snapshot(false);
+  return {
+    extension_enabled,
+    bridge_connection_state,
+    next_reconnect_attempt_at_ms,
+    last_poll_attempt_at_ms,
+    poll_attempt_serial,
+    bridge_url,
+    mcp_port,
+    tabs: latest_tabs_snapshot,
+    connections_snapshot: latest_connections_snapshot,
+  };
+}
+
+async function set_extension_enabled(next_enabled) {
+  if (typeof next_enabled !== "boolean") {
+    throw new Error("enabled must be boolean");
+  }
+
+  if (extension_enabled === next_enabled) {
+    return await get_ui_state();
+  }
+
+  extension_enabled = next_enabled;
+  await chrome.storage.local.set({ extension_enabled });
+
+  if (!extension_enabled) {
+    disconnect_bridge("disabled_by_user");
+  } else {
+    connect_bridge("enabled_by_user");
+  }
+
+  return await get_ui_state();
+}
+
+async function set_mcp_port(next_port) {
+  const validated_port = parse_valid_port(next_port);
+  if (validated_port === null) {
+    throw new Error(`port must be an integer between ${min_port} and ${max_port}`);
+  }
+
+  mcp_port = validated_port;
+  bridge_url = build_bridge_url(mcp_port);
+  await chrome.storage.local.set({
+    mcp_port,
+    bridge_url,
+  });
+
+  if (extension_enabled) {
+    disconnect_bridge("port_changed");
+    connect_bridge("port_changed");
+  } else {
+    notify_ui_state_change();
+  }
+
+  return await get_ui_state();
+}
+
+async function navigate_to_tab(tab_id) {
+  const resolved_tab_id = assert_tab_id(tab_id);
+  const tab = await chrome.tabs.get(resolved_tab_id);
+  await chrome.tabs.update(resolved_tab_id, { active: true });
+  if (typeof tab.windowId === "number") {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+
+  return {
+    tab_id: resolved_tab_id,
+    url: tab.url ?? "",
+    title: tab.title ?? "",
+  };
+}
+
+function register_ui_message_listener() {
+  chrome.runtime.onMessage.addListener((message, _sender, send_response) => {
+    if (!message || typeof message.type !== "string" || !message.type.startsWith("ui_")) {
+      return false;
+    }
+
+    (async () => {
+      if (message.type === "ui_get_state") {
+        return await get_ui_state();
+      }
+
+      if (message.type === "ui_set_enabled") {
+        return await set_extension_enabled(message.enabled);
+      }
+
+      if (message.type === "ui_set_port") {
+        const parsed_port =
+          typeof message.port === "number"
+            ? message.port
+            : typeof message.port === "string"
+              ? Number.parseInt(message.port, 10)
+              : NaN;
+        return await set_mcp_port(parsed_port);
+      }
+
+      if (message.type === "ui_navigate_to_tab") {
+        return await navigate_to_tab(message.tab_id);
+      }
+
+      if (message.type === "ui_detach_tab") {
+        await detach_from_tab(message.tab_id);
+        await sync_tabs_snapshot();
+        return {
+          detached: true,
+          tab_id: message.tab_id,
+        };
+      }
+
+      if (message.type === "ui_close_session") {
+        const agent_session_id = message.agent_session_id;
+        if (typeof agent_session_id !== "string" || agent_session_id.length === 0) {
+          throw new Error("agent_session_id is required");
+        }
+
+        const result = await send_ui_admin_request("close_session", {
+          agent_session_id,
+        });
+
+        return result;
+      }
+
+      throw new Error(`unsupported ui message: ${message.type}`);
+    })()
+      .then((result) => {
+        send_response({
+          ok: true,
+          result,
+        });
+      })
+      .catch((error) => {
+        send_response({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+    return true;
   });
 }
 
@@ -215,7 +769,7 @@ function register_runtime_listeners() {
     }
 
     send_tabs_update().catch((error) => {
-      log("tabs update on tab change failed", error);
+      log_warn("tabs update on tab change failed", error);
     });
   });
 
@@ -231,7 +785,7 @@ function register_runtime_listeners() {
     });
 
     send_tabs_update().catch((error) => {
-      log("tabs update on remove failed", error);
+      log_warn("tabs update on remove failed", error);
     });
   });
 }
@@ -253,7 +807,7 @@ function register_debugger_detach_listener() {
     });
 
     send_tabs_update().catch((error) => {
-      log("tabs update on detach failed", error);
+      log_warn("tabs update on detach failed", error);
     });
   });
 }
@@ -264,6 +818,17 @@ async function handle_bridge_message(raw_data) {
   try {
     payload = JSON.parse(String(raw_data));
   } catch {
+    return;
+  }
+
+  if (payload?.type === "connections_snapshot") {
+    latest_connections_snapshot = normalize_connections_snapshot(payload);
+    notify_ui_state_change();
+    return;
+  }
+
+  if (payload?.type === "ui_admin_response") {
+    resolve_ui_admin_response(payload);
     return;
   }
 
@@ -344,8 +909,7 @@ async function get_tabs_snapshot() {
 }
 
 async function send_tabs_update() {
-  const tabs = await get_tabs_snapshot();
-  send_json({ type: "tabs_update", tabs });
+  await sync_tabs_snapshot(true);
 }
 
 async function execute_browser_tool(tool_name, args, tab_id) {
@@ -1246,7 +1810,7 @@ async function attach_to_tab(tab_id) {
     await send_debugger_command(resolved_tab_id, "Network.enable", {});
     await send_debugger_command(resolved_tab_id, "Runtime.enable", {});
   } catch (error) {
-    log("debugger domain enable failed", error);
+    log_warn("debugger domain enable failed", error);
   }
 }
 
@@ -1416,5 +1980,5 @@ async function send_debugger_command(tab_id, method, params) {
 }
 
 init().catch((error) => {
-  log("fatal init error", error);
+  log_error("fatal init error", error);
 });

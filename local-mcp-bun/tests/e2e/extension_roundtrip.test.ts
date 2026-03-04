@@ -14,6 +14,7 @@ const extension_path = resolve(current_dir, "../../chrome-extension");
 const is_windows = process.platform === "win32";
 const force_cdp_launch = process.env.E2E_FORCE_CDP_LAUNCH === "1";
 const windows_try_persistent_context = process.env.E2E_WINDOWS_TRY_PERSISTENT_CONTEXT === "1";
+const reconnect_wait_timeout_ms = Number.parseInt(process.env.E2E_RECONNECT_WAIT_TIMEOUT_MS ?? "30000", 10);
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
@@ -21,6 +22,7 @@ let browser: Browser | undefined;
 let browser_process: ChildProcess | undefined;
 let fixture_server: Server | undefined;
 let fixture_url = "";
+let extension_id = "";
 const user_data_dirs: string[] = [];
 
 async function sleep(timeout_ms: number): Promise<void> {
@@ -330,6 +332,11 @@ beforeAll(async () => {
     }
 
     expect(service_worker.url()).toContain("chrome-extension://");
+    const extension_url_match = /^chrome-extension:\/\/([^/]+)\//.exec(service_worker.url());
+    if (!extension_url_match) {
+      throw new Error(`failed to resolve extension id from service worker url: ${service_worker.url()}`);
+    }
+    extension_id = extension_url_match[1];
 
     const page = await context.newPage();
     await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -369,108 +376,415 @@ afterAll(async () => {
 test("extension bridge supports attach, navigate, network capture, and pdf export", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e");
 
-  const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
-    action: "list",
-  })) as {
-    tabs: Array<Record<string, unknown>>;
-  };
+  try {
+    const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "list",
+    })) as {
+      tabs: Array<Record<string, unknown>>;
+    };
 
-  const target_tab = find_fixture_tab(tabs_result.tabs);
-  expect(target_tab).toBeDefined();
+    const target_tab = find_fixture_tab(tabs_result.tabs);
+    expect(target_tab).toBeDefined();
 
-  const target_index = target_tab?.index;
-  expect(typeof target_index).toBe("number");
+    const target_index = target_tab?.index;
+    expect(typeof target_index).toBe("number");
 
-  const attach_result = await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
-    action: "attach",
-    index: target_index,
-  });
+    const attach_result = await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "attach",
+      index: target_index,
+    });
 
-  expect(attach_result.action).toBe("attach");
+    expect(attach_result.action).toBe("attach");
 
-  const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {
-    text: "Example Domain",
-  });
+    const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {
+      text: "Example Domain",
+    });
 
-  expect(verify_result.visible).toBe(true);
+    expect(verify_result.visible).toBe(true);
 
-  await runtime.tool_router.call_tool(agent_session_id, "browser_navigate", {
-    action: "reload",
-  });
+    await runtime.tool_router.call_tool(agent_session_id, "browser_navigate", {
+      action: "reload",
+    });
 
-  const evaluate_result = await runtime.tool_router.call_tool(agent_session_id, "browser_evaluate", {
-    expression: "document.title",
-  });
+    const evaluate_result = await runtime.tool_router.call_tool(agent_session_id, "browser_evaluate", {
+      expression: "document.title",
+    });
 
-  expect(evaluate_result.ok).toBe(true);
-  expect(String(evaluate_result.value)).toContain("Example Domain");
+    expect(evaluate_result.ok).toBe(true);
+    expect(String(evaluate_result.value)).toContain("Example Domain");
 
-  const extracted = await runtime.tool_router.call_tool(agent_session_id, "browser_extract_content", {
-    mode: "auto",
-  });
+    const extracted = await runtime.tool_router.call_tool(agent_session_id, "browser_extract_content", {
+      mode: "auto",
+    });
 
-  expect(String(extracted.content)).toContain("Example Domain");
+    expect(String(extracted.content)).toContain("Example Domain");
 
-  await sleep(500);
-  const network_list = (await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
-    action: "list",
-    limit: 20,
-  })) as {
-    requests?: unknown[];
-  };
+    await sleep(500);
+    const network_list = (await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
+      action: "list",
+      limit: 20,
+    })) as {
+      requests?: unknown[];
+    };
 
-  expect(Array.isArray(network_list.requests)).toBe(true);
+    expect(Array.isArray(network_list.requests)).toBe(true);
 
-  const pdf_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_pdf_save", {
-    path: "ignored-by-extension",
-  })) as {
-    data_base64?: string;
-  };
+    const pdf_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_pdf_save", {
+      path: "ignored-by-extension",
+    })) as {
+      data_base64?: string;
+    };
 
-  expect(typeof pdf_result.data_base64).toBe("string");
-  expect((pdf_result.data_base64 ?? "").length).toBeGreaterThan(0);
-
-  await runtime.tool_router.close_session(agent_session_id);
+    expect(typeof pdf_result.data_base64).toBe("string");
+    expect((pdf_result.data_base64 ?? "").length).toBeGreaterThan(0);
+  } finally {
+    await runtime.tool_router.close_session(agent_session_id).catch(() => {
+      // Best-effort cleanup when the session was already closed by the test path.
+    });
+  }
 }, 120_000);
 
 test("extension bridge recovers after mid-command websocket disconnect", async () => {
   const bridge = runtime.bridge_transport as websocket_bridge_transport;
   const { agent_session_id } = runtime.tool_router.open_session("e2e-restart");
 
-  const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
-    action: "list",
-  })) as {
-    tabs: Array<Record<string, unknown>>;
-  };
-
-  const target_tab = find_fixture_tab(tabs_result.tabs);
-  expect(target_tab).toBeDefined();
-
-  await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
-    action: "attach",
-    index: target_tab?.index,
-  });
-
-  const in_flight = runtime.tool_router.call_tool(agent_session_id, "browser_interact", {
-    actions: [{ type: "wait", timeout: 5000 }],
-  });
-
-  await sleep(100);
-  bridge.force_extension_disconnect_for_tests(1012, "e2e-restart");
-
   try {
-    await in_flight;
-    throw new Error("expected in-flight command to fail after disconnect");
-  } catch (error) {
-    expect(error).toBeInstanceOf(tool_error);
-    expect((error as tool_error).code).toBe("EXTENSION_UNAVAILABLE");
+    const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "list",
+    })) as {
+      tabs: Array<Record<string, unknown>>;
+    };
+
+    const target_tab = find_fixture_tab(tabs_result.tabs);
+    expect(target_tab).toBeDefined();
+
+    await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "attach",
+      index: target_tab?.index,
+    });
+
+    const in_flight = runtime.tool_router.call_tool(agent_session_id, "browser_interact", {
+      actions: [{ type: "wait", timeout: 5000 }],
+    });
+
+    await sleep(100);
+    bridge.force_extension_disconnect_for_tests(1012, "e2e-restart");
+
+    try {
+      await in_flight;
+      throw new Error("expected in-flight command to fail after disconnect");
+    } catch (error) {
+      expect(error).toBeInstanceOf(tool_error);
+      expect((error as tool_error).code).toBe("EXTENSION_UNAVAILABLE");
+    }
+
+    await wait_for_condition(
+      () => runtime.bridge_transport.get_state() === "up",
+      Number.isFinite(reconnect_wait_timeout_ms) && reconnect_wait_timeout_ms > 0 ? reconnect_wait_timeout_ms : 30_000,
+      150,
+    );
+
+    const recovered_snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
+    expect(Array.isArray(recovered_snapshot.snapshot)).toBe(true);
+    expect((recovered_snapshot.snapshot as unknown[]).length).toBeGreaterThan(0);
+  } finally {
+    await runtime.tool_router.close_session(agent_session_id).catch(() => {
+      // Best-effort cleanup when the session was already closed by the test path.
+    });
+  }
+}, 120_000);
+
+test("extension popup controls connections, sessions, and bridge port", async () => {
+  if (!context) {
+    throw new Error("browser context is not initialized");
   }
 
-  await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 30_000, 150);
+  if (!extension_id) {
+    throw new Error("extension id is not initialized");
+  }
 
-  const recovered_snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
-  expect(Array.isArray(recovered_snapshot.snapshot)).toBe(true);
-  expect((recovered_snapshot.snapshot as unknown[]).length).toBeGreaterThan(0);
+  const { agent_session_id } = runtime.tool_router.open_session("ui-popup-e2e");
+  const bridge = runtime.bridge_transport as websocket_bridge_transport;
 
-  await runtime.tool_router.close_session(agent_session_id);
-}, 120_000);
+  try {
+    const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "list",
+    })) as {
+      tabs: Array<Record<string, unknown>>;
+    };
+    const target_tab = find_fixture_tab(tabs_result.tabs);
+    expect(target_tab).toBeDefined();
+
+    await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "attach",
+      index: target_tab?.index,
+    });
+
+    const popup_page = await context.newPage();
+    try {
+      await popup_page.goto(`chrome-extension://${extension_id}/popup.html`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60_000,
+      });
+
+      const heading_text = await popup_page.locator("h1").textContent();
+      expect(heading_text ?? "").toMatch(/(Local MCP Control|Browser Use)/);
+
+      const snapshot_chip = popup_page.locator('[data-testid="snapshot-chip"]');
+      expect(await snapshot_chip.isVisible()).toBe(true);
+      expect((await snapshot_chip.textContent()) ?? "").toContain("Snapshot");
+
+      const motion_profile = await popup_page.evaluate(() => {
+        const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+        const poll_indicator = document.getElementById("poll-indicator");
+
+        if (!(toggle_button instanceof HTMLButtonElement)) {
+          throw new Error("toggle-enabled button is unavailable");
+        }
+
+        if (!(poll_indicator instanceof HTMLElement)) {
+          throw new Error("poll indicator is unavailable");
+        }
+
+        poll_indicator.classList.remove("poll-indicator--pulse");
+
+        const transition_values = getComputedStyle(toggle_button)
+          .transitionDuration.split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0)
+          .map((entry) => {
+            if (entry.endsWith("ms")) {
+              return Number.parseFloat(entry) / 1000;
+            }
+
+            if (entry.endsWith("s")) {
+              return Number.parseFloat(entry);
+            }
+
+            return Number.NaN;
+          })
+          .filter((entry) => Number.isFinite(entry));
+
+        const max_toggle_transition_seconds = transition_values.length > 0 ? Math.max(...transition_values) : 0;
+        const base_animation_name = getComputedStyle(poll_indicator).animationName;
+
+        poll_indicator.classList.add("poll-indicator--pulse");
+        const pulse_duration_raw = getComputedStyle(poll_indicator).animationDuration.split(",")[0]?.trim() ?? "0s";
+        poll_indicator.classList.remove("poll-indicator--pulse");
+
+        const pulse_animation_seconds = pulse_duration_raw.endsWith("ms")
+          ? Number.parseFloat(pulse_duration_raw) / 1000
+          : pulse_duration_raw.endsWith("s")
+            ? Number.parseFloat(pulse_duration_raw)
+            : Number.NaN;
+
+        return {
+          max_toggle_transition_seconds,
+          base_animation_name,
+          pulse_animation_seconds,
+        };
+      });
+
+      expect(motion_profile.max_toggle_transition_seconds).toBeGreaterThanOrEqual(0.22);
+      expect(motion_profile.max_toggle_transition_seconds).toBeLessThanOrEqual(0.45);
+      expect(motion_profile.base_animation_name).toBe("none");
+      expect(motion_profile.pulse_animation_seconds).toBeGreaterThanOrEqual(0.85);
+      expect(motion_profile.pulse_animation_seconds).toBeLessThanOrEqual(1.2);
+
+      const ui_stability = await popup_page.evaluate(async () => {
+        const initial = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+        if (!(initial instanceof HTMLButtonElement)) {
+          throw new Error("toggle-enabled button is unavailable");
+        }
+
+        let last = initial;
+        let replacement_count = 0;
+
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const current = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+          if (!(current instanceof HTMLButtonElement)) {
+            throw new Error("toggle-enabled button disappeared");
+          }
+
+          if (current !== last) {
+            replacement_count += 1;
+            last = current;
+          }
+        }
+
+        return {
+          replacement_count,
+        };
+      });
+      expect(ui_stability.replacement_count).toBeLessThanOrEqual(1);
+
+      const close_session_button = popup_page.locator(
+        `button[data-action=\"close-session\"][data-agent-session-id=\"${agent_session_id}\"]`,
+      );
+      expect(await close_session_button.isVisible()).toBe(true);
+
+      await popup_page.evaluate(async (session_id) => {
+        const response = await chrome.runtime.sendMessage({
+          type: "ui_close_session",
+          agent_session_id: session_id,
+        });
+        if (!response || response.ok !== true) {
+          throw new Error(`ui_close_session failed: ${response?.error || "unknown error"}`);
+        }
+      }, agent_session_id);
+      await wait_for_condition(() => !runtime.session_registry.list_active_sessions().includes(agent_session_id), 30_000, 150);
+
+      expect(
+        await popup_page.evaluate(() => {
+          const port_input = document.getElementById("port-input");
+          return port_input instanceof HTMLInputElement;
+        }),
+      ).toBe(true);
+
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const port_input = document.getElementById("port-input");
+            const save_button = document.querySelector('button[data-action="save-port"]');
+            return (
+              port_input instanceof HTMLInputElement &&
+              save_button instanceof HTMLButtonElement &&
+              !port_input.disabled &&
+              !save_button.disabled
+            );
+          }),
+        30_000,
+        150,
+      );
+
+      await popup_page.evaluate((next_port) => {
+        const port_input = document.getElementById("port-input");
+        const save_button = document.querySelector('button[data-action="save-port"]');
+        if (!(port_input instanceof HTMLInputElement) || !(save_button instanceof HTMLButtonElement)) {
+          throw new Error("port controls are unavailable");
+        }
+
+        port_input.value = String(next_port);
+        port_input.dispatchEvent(new Event("input", { bubbles: true }));
+        save_button.click();
+      }, 37778);
+      await wait_for_condition(
+        async () =>
+          bridge.get_state() !== "up" ||
+          (await popup_page.evaluate(() => {
+            const chips = Array.from(document.querySelectorAll(".chip"));
+            return chips.some((chip) => String(chip.textContent || "").includes("Waiting for connection"));
+          })),
+        30_000,
+        150,
+      );
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const chips = Array.from(document.querySelectorAll(".chip"));
+            return chips.some((chip) => String(chip.textContent || "").includes("Waiting for connection"));
+          }),
+        30_000,
+        150,
+      );
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const poll_status_label = document.getElementById("poll-status-label");
+            if (!(poll_status_label instanceof HTMLElement)) {
+              return false;
+            }
+
+            const text = String(poll_status_label.textContent || "");
+            return /^Polling in \d+s$/.test(text) || text === "Polling now...";
+          }),
+        30_000,
+        150,
+      );
+
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const port_input = document.getElementById("port-input");
+            const save_button = document.querySelector('button[data-action="save-port"]');
+            return (
+              port_input instanceof HTMLInputElement &&
+              save_button instanceof HTMLButtonElement &&
+              !port_input.disabled &&
+              !save_button.disabled
+            );
+          }),
+        30_000,
+        150,
+      );
+
+      await popup_page.evaluate((next_port) => {
+        const port_input = document.getElementById("port-input");
+        const save_button = document.querySelector('button[data-action="save-port"]');
+        if (!(port_input instanceof HTMLInputElement) || !(save_button instanceof HTMLButtonElement)) {
+          throw new Error("port controls are unavailable");
+        }
+
+        port_input.value = String(next_port);
+        port_input.dispatchEvent(new Event("input", { bubbles: true }));
+        save_button.click();
+      }, 37777);
+      await wait_for_condition(() => bridge.get_state() === "up", 45_000, 150);
+
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+            return toggle_button instanceof HTMLButtonElement && !toggle_button.disabled;
+          }),
+        30_000,
+        150,
+      );
+
+      let expected_bridge_up = false;
+      for (let index = 0; index < 6; index += 1) {
+        await popup_page.evaluate(() => {
+          const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+          if (!(toggle_button instanceof HTMLButtonElement)) {
+            throw new Error("toggle-enabled button is unavailable");
+          }
+
+          toggle_button.click();
+        });
+
+        await wait_for_condition(() => (bridge.get_state() === "up") === expected_bridge_up, expected_bridge_up ? 45_000 : 30_000, 150);
+
+        await wait_for_condition(
+          () =>
+            popup_page.evaluate(() => {
+              const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+              return toggle_button instanceof HTMLButtonElement && !toggle_button.disabled;
+            }),
+          30_000,
+          150,
+        );
+
+        expected_bridge_up = !expected_bridge_up;
+      }
+
+      await popup_page.evaluate(() => {
+        const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+        if (!(toggle_button instanceof HTMLButtonElement)) {
+          throw new Error("toggle-enabled button is unavailable");
+        }
+
+        toggle_button.click();
+        toggle_button.click();
+      });
+      await wait_for_condition(() => bridge.get_state() !== "up", 30_000, 150);
+      await wait_for_condition(() => bridge.get_state() === "up", 45_000, 150);
+    } finally {
+      await popup_page.close();
+    }
+  } finally {
+    await runtime.tool_router.close_session(agent_session_id).catch(() => {
+      // Best-effort cleanup when the session was already closed by the test path.
+    });
+  }
+}, 180_000);

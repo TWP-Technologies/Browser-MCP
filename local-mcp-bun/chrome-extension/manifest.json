@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Local MCP Bun Extension",
+  "name": "Browser Use for AI Agents",
   "version": "0.1.0",
-  "description": "Modified by [KnotFalse]. Local-only extension bridge for multiplexed browser MCP.",
+  "description": "A local-only extension bridge for multiplexed browser MCP. Modified by [KnotFalse]; inspired by Blueprint MCP",
   "permissions": [
     "tabs",
     "debugger",
@@ -21,6 +21,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Local MCP Bun"
+    "default_title": "Local MCP Bun",
+    "default_popup": "popup.html"
   }
 }
