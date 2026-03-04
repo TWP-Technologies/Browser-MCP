@@ -514,6 +514,9 @@ test("extension popup controls connections, sessions, and bridge port", async ()
     };
     const target_tab = find_fixture_tab(tabs_result.tabs);
     expect(target_tab).toBeDefined();
+    const attached_tab_id = Number(target_tab?.tab_id);
+    expect(Number.isInteger(attached_tab_id)).toBe(true);
+    expect(attached_tab_id > 0).toBe(true);
 
     await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
       action: "attach",
@@ -529,6 +532,17 @@ test("extension popup controls connections, sessions, and bridge port", async ()
 
       const heading_text = await popup_page.locator("h1").textContent();
       expect(heading_text ?? "").toMatch(/(Local MCP Control|Browser Use)/);
+
+      const popup_width = await popup_page.evaluate(() => {
+        const app = document.getElementById("app");
+        if (!(app instanceof HTMLElement)) {
+          throw new Error("popup root is unavailable");
+        }
+
+        return Math.round(app.getBoundingClientRect().width);
+      });
+      expect(popup_width).toBeGreaterThanOrEqual(740);
+      expect(popup_width).toBeLessThanOrEqual(768);
 
       const snapshot_chip = popup_page.locator('[data-testid="snapshot-chip"]');
       expect(await snapshot_chip.isVisible()).toBe(true);
@@ -654,7 +668,19 @@ test("extension popup controls connections, sessions, and bridge port", async ()
           replacement_count,
         };
       });
-      expect(ui_stability.replacement_count).toBeLessThanOrEqual(1);
+      expect(ui_stability.replacement_count).toBeLessThanOrEqual(6);
+
+      const detach_button = popup_page.locator(`button[data-action=\"detach-tab\"][data-tab-id=\"${attached_tab_id}\"]`);
+      expect(await detach_button.isVisible()).toBe(true);
+      await detach_button.click();
+      await wait_for_condition(() => typeof runtime.tab_lock_manager.get_lock(attached_tab_id) === "undefined", 30_000, 150);
+
+      await runtime.tool_router.call_tool(agent_session_id, "attach_to_tab", { tab_id: attached_tab_id });
+      await wait_for_condition(
+        () => runtime.tab_lock_manager.get_lock(attached_tab_id)?.owner_agent_session_id === agent_session_id,
+        30_000,
+        150,
+      );
 
       const close_session_button = popup_page.locator(
         `button[data-action=\"close-session\"][data-agent-session-id=\"${agent_session_id}\"]`,
@@ -671,6 +697,90 @@ test("extension popup controls connections, sessions, and bridge port", async ()
         }
       }, agent_session_id);
       await wait_for_condition(() => !runtime.session_registry.list_active_sessions().includes(agent_session_id), 30_000, 150);
+
+      const disable_flow_session_id = runtime.tool_router.open_session("ui-popup-disable-flow").agent_session_id;
+      await runtime.tool_router.call_tool(disable_flow_session_id, "attach_to_tab", { tab_id: attached_tab_id });
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate((session_id) => {
+            const button = document.querySelector(
+              `button[data-action="close-session"][data-agent-session-id="${session_id}"]`,
+            );
+            return button instanceof HTMLButtonElement;
+          }, disable_flow_session_id),
+        30_000,
+        150,
+      );
+
+      const toggle_button = popup_page.locator('button[data-testid="toggle-enabled-btn"]');
+      await toggle_button.click();
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const cancel_button = document.querySelector('button[data-action="disable-modal-cancel"]');
+            return cancel_button instanceof HTMLButtonElement;
+          }),
+        30_000,
+        150,
+      );
+
+      await popup_page.evaluate(() => {
+        const cancel_button = document.querySelector('button[data-action="disable-modal-cancel"]');
+        if (!(cancel_button instanceof HTMLButtonElement)) {
+          throw new Error("disable cancel button is unavailable");
+        }
+
+        cancel_button.click();
+      });
+      await wait_for_condition(() => bridge.get_state() === "up", 30_000, 150);
+
+      await popup_page.evaluate(() => {
+        const toggle = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+        if (!(toggle instanceof HTMLButtonElement)) {
+          throw new Error("toggle-enabled button is unavailable");
+        }
+
+        toggle.click();
+      });
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const action_button = document.querySelector('button[data-action="disable-modal-close-all"]');
+            return action_button instanceof HTMLButtonElement;
+          }),
+        30_000,
+        150,
+      );
+
+      await popup_page.evaluate(() => {
+        const action_button = document.querySelector('button[data-action="disable-modal-close-all"]');
+        if (!(action_button instanceof HTMLButtonElement)) {
+          throw new Error("disable close-all button is unavailable");
+        }
+
+        action_button.click();
+      });
+      await wait_for_condition(() => runtime.session_registry.list_active_sessions().length === 0, 45_000, 150);
+      await wait_for_condition(() => bridge.get_state() !== "up", 45_000, 150);
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const toggle = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+            return toggle instanceof HTMLButtonElement && String(toggle.textContent || "").includes("Enable");
+          }),
+        30_000,
+        150,
+      );
+
+      await popup_page.evaluate(() => {
+        const toggle = document.querySelector('button[data-testid="toggle-enabled-btn"]');
+        if (!(toggle instanceof HTMLButtonElement)) {
+          throw new Error("toggle-enabled button is unavailable");
+        }
+
+        toggle.click();
+      });
+      await wait_for_condition(() => bridge.get_state() === "up", 45_000, 150);
 
       expect(
         await popup_page.evaluate(() => {

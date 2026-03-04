@@ -111,7 +111,8 @@ body::before {
 }
 
 #app {
-  width: 440px;
+  width: min(768px, 100vw);
+  max-width: 768px;
   min-height: 560px;
   padding: 12px;
   margin: 0;
@@ -137,6 +138,7 @@ body::before {
 
 h1,
 h2,
+h3,
 p,
 dl,
 dd,
@@ -156,6 +158,15 @@ h1 {
 h2 {
   font-family: "Rajdhani", "IBM Plex Sans", sans-serif;
   font-size: 17px;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-strong);
+}
+
+h3 {
+  font-family: "Rajdhani", "IBM Plex Sans", sans-serif;
+  font-size: 16px;
   line-height: 1;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -705,6 +716,45 @@ tbody tr:last-child td {
   line-height: 1;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 7, 14, 0.72);
+  backdrop-filter: blur(3px);
+  display: grid;
+  place-items: center;
+  z-index: 25;
+  padding: 12px;
+}
+
+.modal-backdrop--hidden {
+  display: none;
+}
+
+.modal-card {
+  width: min(540px, 100%);
+  border-radius: 14px;
+  border: 1px solid var(--line-bright);
+  background: linear-gradient(180deg, rgba(20, 33, 51, 0.98) 0%, rgba(13, 23, 37, 0.98) 100%);
+  box-shadow: var(--shadow-1);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.modal-card p {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #app {
     animation: none;
@@ -721,5 +771,12 @@ tbody tr:last-child td {
 
   .poll-indicator--pulse {
     animation: none;
+  }
+}
+
+@media (max-width: 780px) {
+  #app {
+    min-height: auto;
+    padding: 10px;
   }
 }

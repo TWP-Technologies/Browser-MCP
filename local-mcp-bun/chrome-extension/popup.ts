@@ -66,6 +66,15 @@ interface ui_response<T> {
   error?: string;
 }
 
+interface close_all_sessions_result {
+  attempted_session_ids?: string[];
+  closed_session_ids?: string[];
+  failed?: Array<{
+    agent_session_id?: string;
+    error?: string;
+  }>;
+}
+
 const browser_api = chrome;
 const app_root = document.getElementById("app");
 
@@ -94,6 +103,8 @@ const poll_pulse_min_gap_ms = 600;
 let bridge_url_copy_state: "idle" | "copied" | "failed" = "idle";
 let bridge_url_copy_reset_timer: ReturnType<typeof setTimeout> | null = null;
 const bridge_url_copy_feedback_timeout_ms = 1800;
+let disable_modal_open = false;
+let disable_modal_busy = false;
 
 function escape_html(input: unknown): string {
   return String(input)
@@ -477,6 +488,87 @@ async function run_action(callback: () => Promise<void>): Promise<void> {
   }
 }
 
+function get_active_session_count(): number {
+  const sessions = ui_state?.connections_snapshot?.sessions;
+  if (!Array.isArray(sessions)) {
+    return 0;
+  }
+
+  return sessions.filter((session) => typeof session?.agent_session_id === "string").length;
+}
+
+function set_disable_modal_state(open: boolean, busy = false): void {
+  disable_modal_open = open;
+  disable_modal_busy = busy;
+  render();
+}
+
+function summarize_close_all_failures(payload: close_all_sessions_result): string {
+  const failed_rows = Array.isArray(payload.failed) ? payload.failed : [];
+  if (failed_rows.length === 0) {
+    return "";
+  }
+
+  const failed_summary = failed_rows
+    .map((entry) => {
+      const agent_session_id = typeof entry.agent_session_id === "string" ? entry.agent_session_id : "unknown-session";
+      const message = typeof entry.error === "string" && entry.error.length > 0 ? entry.error : "unknown failure";
+      return `${agent_session_id}: ${message}`;
+    })
+    .join("; ");
+
+  return `Disabled connections with close-session failures: ${failed_summary}`;
+}
+
+async function apply_extension_enabled(target_enabled: boolean): Promise<void> {
+  await send_ui_message<popup_state>("ui_set_enabled", {
+    enabled: target_enabled,
+  });
+  await refresh_state(false, false);
+}
+
+async function run_disable_with_close_all_sessions(): Promise<void> {
+  if (toggle_in_flight || action_in_flight) {
+    return;
+  }
+
+  toggle_in_flight = true;
+  disable_modal_busy = true;
+  render();
+
+  let close_all_failure_summary = "";
+
+  try {
+    try {
+      const close_all_result = await send_ui_message<close_all_sessions_result>("ui_close_all_sessions");
+      close_all_failure_summary = summarize_close_all_failures(close_all_result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      close_all_failure_summary = `Failed to close all sessions before disable: ${message}`;
+    }
+
+    await apply_extension_enabled(false);
+    if (close_all_failure_summary.length > 0) {
+      error_message = close_all_failure_summary;
+    }
+  } catch (error) {
+    const disable_message = error instanceof Error ? error.message : String(error);
+    if (close_all_failure_summary.length > 0) {
+      error_message = `${close_all_failure_summary} Disable failed: ${disable_message}`;
+    } else {
+      error_message = disable_message;
+    }
+  } finally {
+    disable_modal_open = false;
+    disable_modal_busy = false;
+    queued_toggle_target_enabled = null;
+    executing_toggle_target_enabled = null;
+    toggle_in_flight = false;
+    render();
+    flush_pending_live_refresh_if_ready();
+  }
+}
+
 function resolve_toggle_next_target_enabled(): boolean {
   return compute_next_toggle_target_enabled({
     extension_enabled: ui_state?.extension_enabled === true,
@@ -519,10 +611,7 @@ async function drain_toggle_queue(): Promise<void> {
         continue;
       }
 
-      await send_ui_message<popup_state>("ui_set_enabled", {
-        enabled: target_enabled,
-      });
-      await refresh_state(false, false);
+      await apply_extension_enabled(target_enabled);
 
       executing_toggle_target_enabled = null;
     }
@@ -692,8 +781,9 @@ function render(): void {
   const sorted_sessions = sessions
     .filter((session) => typeof session.agent_session_id === "string")
     .sort((left, right) => left.agent_session_id.localeCompare(right.agent_session_id));
+  const active_session_count = sorted_sessions.length;
 
-  const disable_non_toggle_actions = loading || action_in_flight || toggle_in_flight;
+  const disable_non_toggle_actions = loading || action_in_flight || toggle_in_flight || disable_modal_busy;
   const disable_toggle_action = loading || action_in_flight;
   const toggle_reference_enabled = resolve_toggle_reference_enabled({
     extension_enabled,
@@ -836,6 +926,23 @@ function render(): void {
         </header>
         ${render_session_rows(sorted_sessions, disable_non_toggle_actions)}
       </section>
+      <div class="modal-backdrop ${disable_modal_open ? "" : "modal-backdrop--hidden"}" data-testid="disable-modal-backdrop">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="disable-modal-title">
+          <h3 id="disable-modal-title">Disable Agent Connections?</h3>
+          <p>
+            ${escape_html(
+              `You have ${active_session_count} active session${active_session_count === 1 ? "" : "s"}. You can disable only, or close all sessions first and then disable.`,
+            )}
+          </p>
+          <div class="modal-actions">
+            <button class="btn btn--ghost" data-action="disable-modal-cancel" ${disable_modal_busy ? "disabled" : ""}>Cancel</button>
+            <button class="btn btn--danger" data-action="disable-modal-disable-only" ${disable_modal_busy ? "disabled" : ""}>Disable Only</button>
+            <button class="btn btn--primary" data-action="disable-modal-close-all" ${disable_modal_busy ? "disabled" : ""}>
+              ${disable_modal_busy ? "Closing Sessions..." : "Close All + Disable"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 
@@ -917,7 +1024,28 @@ function register_event_listeners(): void {
 
     if (action === "toggle-enabled") {
       const next_target_enabled = resolve_toggle_next_target_enabled();
+      if (!next_target_enabled && get_active_session_count() > 0) {
+        set_disable_modal_state(true, false);
+        return;
+      }
+
       queue_toggle_target_enabled(next_target_enabled);
+      return;
+    }
+
+    if (action === "disable-modal-cancel") {
+      set_disable_modal_state(false, false);
+      return;
+    }
+
+    if (action === "disable-modal-disable-only") {
+      set_disable_modal_state(false, false);
+      queue_toggle_target_enabled(false);
+      return;
+    }
+
+    if (action === "disable-modal-close-all") {
+      void run_disable_with_close_all_sessions();
       return;
     }
 
@@ -947,7 +1075,7 @@ function register_event_listeners(): void {
     if (action === "detach-tab") {
       const tab_id = Number.parseInt(button.dataset.tabId || "", 10);
       void run_action(async () => {
-        await send_ui_message("ui_detach_tab", { tab_id });
+        await send_ui_message("ui_detach_locked_tab", { tab_id });
       });
       return;
     }

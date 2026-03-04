@@ -15,6 +15,11 @@ test("popup css defines calm motion tokens", () => {
   expect(popup_css).toContain("--motion-ease-standard: ease-out;");
 });
 
+test("popup css uses 768px default width with viewport fallback", () => {
+  expect(popup_css).toContain("width: min(768px, 100vw);");
+  expect(popup_css).toContain("max-width: 768px;");
+});
+
 test("poll pulse animation uses calm duration token", () => {
   expect(popup_css).toMatch(
     /\.poll-indicator--pulse\s*\{[\s\S]*animation:\s*poll-pulse\s+var\(--motion-duration-pulse\)\s+var\(--motion-ease-standard\);/m,
