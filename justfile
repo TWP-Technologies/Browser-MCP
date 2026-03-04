@@ -81,3 +81,19 @@ ci-view run_id:
 
 ci-failed-log job_id:
   gh run view --repo {{repo}} --job {{job_id}} --log-failed
+
+# Verify release tag/package/manifest versions match (accepts vX.Y.Z or X.Y.Z).
+package-version-check version:
+  cd {{project}} && version_arg="{{version}}"; version_arg="${version_arg#version=}"; bun run release:check-version -- --version="$version_arg"
+
+# Build both release artifacts (server binary + extension zip).
+package:
+  cd {{project}} && bun run package:release -- --mode=all --clean
+
+# Build only server release artifact.
+package-server version="" clean="false":
+  cd {{project}} && version_arg="{{version}}"; version_arg="${version_arg#version=}"; clean_arg="{{clean}}"; clean_arg="${clean_arg#clean=}"; clean_flag=""; if [ "$clean_arg" = "true" ]; then clean_flag="--clean"; fi; if [ -n "$version_arg" ]; then bun run package:release -- --mode=server --version="$version_arg" $clean_flag; else bun run package:release -- --mode=server $clean_flag; fi
+
+# Build only extension release artifact.
+package-extension version="" clean="false":
+  cd {{project}} && version_arg="{{version}}"; version_arg="${version_arg#version=}"; clean_arg="{{clean}}"; clean_arg="${clean_arg#clean=}"; clean_flag=""; if [ "$clean_arg" = "true" ]; then clean_flag="--clean"; fi; if [ -n "$version_arg" ]; then bun run package:release -- --mode=extension --version="$version_arg" $clean_flag; else bun run package:release -- --mode=extension $clean_flag; fi

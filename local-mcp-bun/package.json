@@ -18,10 +18,13 @@
     "test:hard-gate": "bun run test:unit && bun run test:integration && bun run test:e2e && bun run test:fault && bun run test:concurrency",
     "lint:spec": "bun run scripts/validate_living_spec.ts",
     "lint:compliance": "bun run scripts/compliance_scan.ts",
-    "ci:evidence": "bun run scripts/write_ci_evidence.ts"
+    "ci:evidence": "bun run scripts/write_ci_evidence.ts",
+    "release:check-version": "bun run scripts/check_release_version_sync.ts",
+    "package:release": "bun run scripts/package_release.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "fflate": "^0.8.2",
     "playwright": "^1.58.2",
     "typescript": "^5.8.2"
   }
