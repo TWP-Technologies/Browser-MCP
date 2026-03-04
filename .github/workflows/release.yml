@@ -155,6 +155,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          find release-assets -mindepth 2 -type f -name 'SHA256SUMS.txt' -delete
           find release-assets -type f \
             ! -name 'SHA256SUMS.txt' \
             ! -name '*.sha256' \
