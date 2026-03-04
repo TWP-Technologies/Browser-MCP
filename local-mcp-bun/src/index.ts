@@ -1,5 +1,5 @@
 import { mcp_stdio_server } from "./mcp_stdio_server";
-import { resolve_auth_token } from "./config";
+import { resolve_auth_token, resolve_bridge_mode } from "./config";
 import { local_mcp_runtime } from "./runtime";
 
 function get_env_string(name: string): string | undefined {
@@ -26,7 +26,7 @@ function parse_port(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
-  const bridge_mode = process.env.BRIDGE_MODE === "websocket" ? "websocket" : "in_memory";
+  const bridge_mode = resolve_bridge_mode(process.env as Record<string, string | undefined>);
   const bridge_host = get_env_string("BRIDGE_HOST") ?? "127.0.0.1";
   const bridge_port = parse_port("BRIDGE_PORT", 37777);
   const auth = resolve_auth_token(process.env as Record<string, string | undefined>);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assert_loopback_host, is_loopback_host, resolve_auth_token } from "../../src/config";
+import { assert_loopback_host, is_loopback_host, resolve_auth_token, resolve_bridge_mode } from "../../src/config";
 
 test("is_loopback_host accepts loopback hostnames and addresses", () => {
   expect(is_loopback_host("localhost")).toBe(true);
@@ -44,4 +44,21 @@ test("resolve_auth_token can auto-generate token without manual value", () => {
   expect(auto_by_flag.generated_automatically).toBe(true);
   expect(typeof auto_by_flag.auth_token).toBe("string");
   expect((auto_by_flag.auth_token ?? "").startsWith("auto-")).toBe(true);
+});
+
+test("resolve_bridge_mode defaults to websocket when unset", () => {
+  expect(resolve_bridge_mode({})).toBe("websocket");
+  expect(resolve_bridge_mode({ BRIDGE_MODE: "" })).toBe("websocket");
+});
+
+test("resolve_bridge_mode accepts supported explicit values", () => {
+  expect(resolve_bridge_mode({ BRIDGE_MODE: "websocket" })).toBe("websocket");
+  expect(resolve_bridge_mode({ BRIDGE_MODE: "in_memory" })).toBe("in_memory");
+  expect(resolve_bridge_mode({ BRIDGE_MODE: "WebSocket" })).toBe("websocket");
+});
+
+test("resolve_bridge_mode fails fast for unsupported values", () => {
+  expect(() => resolve_bridge_mode({ BRIDGE_MODE: "ws" })).toThrow(
+    "BRIDGE_MODE must be either 'websocket' or 'in_memory'",
+  );
 });

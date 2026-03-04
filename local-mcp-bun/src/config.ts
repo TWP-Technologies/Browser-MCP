@@ -11,6 +11,8 @@ function get_non_empty_string(input: string | undefined): string | undefined {
   return trimmed;
 }
 
+export type bridge_mode = "in_memory" | "websocket";
+
 export function is_loopback_host(host: string): boolean {
   const normalized = host.trim().toLowerCase();
 
@@ -54,4 +56,18 @@ export function resolve_auth_token(env: Record<string, string | undefined>): {
     auth_token: `auto-${crypto.randomUUID()}`,
     generated_automatically: true,
   };
+}
+
+export function resolve_bridge_mode(env: Record<string, string | undefined>): bridge_mode {
+  const configured = get_non_empty_string(env.BRIDGE_MODE);
+  if (!configured) {
+    return "websocket";
+  }
+
+  const normalized = configured.toLowerCase();
+  if (normalized === "websocket" || normalized === "in_memory") {
+    return normalized;
+  }
+
+  throw new Error(`BRIDGE_MODE must be either 'websocket' or 'in_memory', received '${configured}'`);
 }
