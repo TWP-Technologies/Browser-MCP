@@ -21,6 +21,19 @@ async function sleep(timeout_ms: number): Promise<void> {
   });
 }
 
+function cleanup_user_data_dir(path: string): void {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        console.error(`[e2e] failed to cleanup user data dir '${path}':`, error);
+      }
+    }
+  }
+}
+
 async function wait_for_condition(
   condition: () => boolean | Promise<boolean>,
   timeout_ms = 30_000,
@@ -77,7 +90,7 @@ afterAll(async () => {
   } finally {
     await runtime.stop();
     if (user_data_dir) {
-      rmSync(user_data_dir, { recursive: true, force: true });
+      cleanup_user_data_dir(user_data_dir);
     }
   }
 }, 60_000);
