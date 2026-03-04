@@ -6,7 +6,7 @@ const default_mcp_protocol_version = "2024-11-05";
 const local_protocol_version = "local-mcp-bun-v2";
 const server_info = {
   name: "local-mcp",
-  version: "0.1.0",
+  version: "0.1.1",
 } as const;
 
 export class mcp_stdio_server {

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 interface json_rpc_response {
@@ -21,9 +22,15 @@ interface running_server {
 }
 
 const running_servers: running_server[] = [];
+const project_root = resolve(import.meta.dir, "../..");
+const package_version = (
+  JSON.parse(readFileSync(resolve(project_root, "package.json"), "utf8")) as { version?: string }
+).version;
+if (typeof package_version !== "string" || package_version.length === 0) {
+  throw new Error("package.json version must be set for protocol compatibility tests");
+}
 
 function start_stdio_server(): running_server {
-  const project_root = resolve(import.meta.dir, "../..");
   const child_process = spawn("bun", ["run", "src/index.ts"], {
     cwd: project_root,
     env: {
@@ -151,6 +158,7 @@ test("stdio initialize responds with MCP-compatible shape", async () => {
   });
   expect(initialize_response.result?.serverInfo).toMatchObject({
     name: "local-mcp",
+    version: package_version,
   });
   expect(typeof initialize_response.result?.agent_session_id).toBe("string");
 
