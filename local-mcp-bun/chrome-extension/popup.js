@@ -67,6 +67,9 @@ var last_seen_poll_attempt_serial = null;
 var last_poll_pulse_started_at_ms = 0;
 var poll_pulse_duration_ms = 900;
 var poll_pulse_min_gap_ms = 600;
+var bridge_url_copy_state = "idle";
+var bridge_url_copy_reset_timer = null;
+var bridge_url_copy_feedback_timeout_ms = 1800;
 function escape_html(input) {
   return String(input).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -187,6 +190,90 @@ function sync_waiting_ui_effects() {
   update_poll_status_label_dom();
   sync_poll_indicator_dom();
   sync_waiting_countdown_timer();
+}
+function resolve_bridge_url_copy_status_label() {
+  if (bridge_url_copy_state === "copied") {
+    return "Copied full URL";
+  }
+  if (bridge_url_copy_state === "failed") {
+    return "Clipboard unavailable";
+  }
+  return "Click URL to copy";
+}
+function resolve_bridge_url_copy_button_label() {
+  return bridge_url_copy_state === "copied" ? "Copied" : "Copy";
+}
+function sync_bridge_url_copy_dom() {
+  const copy_button = document.querySelector('[data-testid="copy-bridge-url-btn"]');
+  if (copy_button instanceof HTMLButtonElement) {
+    copy_button.textContent = resolve_bridge_url_copy_button_label();
+  }
+  const copy_status = document.querySelector('[data-testid="bridge-url-copy-status"]');
+  if (copy_status instanceof HTMLElement) {
+    copy_status.textContent = resolve_bridge_url_copy_status_label();
+    copy_status.classList.toggle("meta-copy-status--visible", bridge_url_copy_state !== "idle");
+  }
+}
+function clear_bridge_url_copy_reset_timer() {
+  if (bridge_url_copy_reset_timer === null) {
+    return;
+  }
+  globalThis.clearTimeout(bridge_url_copy_reset_timer);
+  bridge_url_copy_reset_timer = null;
+}
+function set_bridge_url_copy_state(next_state) {
+  bridge_url_copy_state = next_state;
+  clear_bridge_url_copy_reset_timer();
+  if (next_state !== "idle") {
+    bridge_url_copy_reset_timer = globalThis.setTimeout(() => {
+      bridge_url_copy_reset_timer = null;
+      bridge_url_copy_state = "idle";
+      sync_bridge_url_copy_dom();
+    }, bridge_url_copy_feedback_timeout_ms);
+  }
+  sync_bridge_url_copy_dom();
+}
+function fallback_copy_text_to_clipboard(value) {
+  try {
+    const text_area = document.createElement("textarea");
+    text_area.value = value;
+    text_area.setAttribute("readonly", "true");
+    text_area.style.position = "fixed";
+    text_area.style.top = "-10000px";
+    text_area.style.opacity = "0";
+    document.body.appendChild(text_area);
+    text_area.focus();
+    text_area.select();
+    text_area.setSelectionRange(0, text_area.value.length);
+    const copied = document.execCommand("copy");
+    text_area.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+async function write_text_to_clipboard(value) {
+  if (typeof navigator.clipboard?.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const copied = fallback_copy_text_to_clipboard(value);
+  if (!copied) {
+    throw new Error("clipboard write failed");
+  }
+}
+async function copy_bridge_url() {
+  const bridge_url = ui_state?.bridge_url?.trim();
+  if (!bridge_url) {
+    set_bridge_url_copy_state("failed");
+    return;
+  }
+  try {
+    await write_text_to_clipboard(bridge_url);
+    set_bridge_url_copy_state("copied");
+  } catch {
+    set_bridge_url_copy_state("failed");
+  }
 }
 function trigger_poll_pulse() {
   const now_ms = Date.now();
@@ -462,6 +549,8 @@ function render() {
   const toggle_button_class = toggle_reference_enabled ? "btn--danger" : "btn--primary";
   const bridge_state_label = describe_bridge_state(bridge_mode);
   const waiting_poll_label = describe_poll_schedule(ui_state?.next_reconnect_attempt_at_ms);
+  const bridge_url_copy_button_label = resolve_bridge_url_copy_button_label();
+  const bridge_url_copy_status_label = resolve_bridge_url_copy_status_label();
   app_root.innerHTML = `
     <div class="surface">
       ${error_message ? `<div class="error-banner" role="alert">
@@ -508,8 +597,33 @@ function render() {
 
         <dl class="meta-strip">
           <div class="meta-item meta-item--url">
-            <dt>URL</dt>
-            <dd><code>${escape_html(bridge_url)}</code></dd>
+            <div class="meta-item__header">
+              <dt>URL</dt>
+              <button
+                class="btn btn--ghost btn--tiny"
+                data-action="copy-bridge-url"
+                data-testid="copy-bridge-url-btn"
+                ${disable_non_toggle_actions ? "disabled" : ""}
+              >
+                ${escape_html(bridge_url_copy_button_label)}
+              </button>
+            </div>
+            <dd>
+              <button
+                class="url-copy-surface"
+                type="button"
+                data-action="copy-bridge-url"
+                data-testid="bridge-url-copy-surface"
+                title="Copy full bridge URL"
+                ${disable_non_toggle_actions ? "disabled" : ""}
+              >
+                <code data-testid="bridge-url-text">${escape_html(bridge_url)}</code>
+              </button>
+              <span
+                class="meta-copy-status ${bridge_url_copy_state === "idle" ? "" : "meta-copy-status--visible"}"
+                data-testid="bridge-url-copy-status"
+              >${escape_html(bridge_url_copy_status_label)}</span>
+            </dd>
           </div>
           <div class="meta-item">
             <dt>Locks</dt>
@@ -561,6 +675,7 @@ function render() {
     </div>
   `;
   sync_waiting_ui_effects();
+  sync_bridge_url_copy_dom();
 }
 function register_event_listeners() {
   if (!app_root) {
@@ -624,6 +739,10 @@ function register_event_listeners() {
           port: next_port
         });
       });
+      return;
+    }
+    if (action === "copy-bridge-url") {
+      copy_bridge_url();
       return;
     }
     if (action === "goto-tab") {

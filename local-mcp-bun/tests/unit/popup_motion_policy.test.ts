@@ -29,6 +29,8 @@ test("popup css no longer contains legacy hyperfast duration literals", () => {
 
 test("reduced motion media query still disables transitions and animations", () => {
   expect(popup_css).toContain("@media (prefers-reduced-motion: reduce)");
-  expect(popup_css).toMatch(/\.btn,[\s\S]*input\[type="number"\]\s*\{[\s\S]*transition:\s*none;/m);
+  expect(popup_css).toMatch(
+    /\.btn,[\s\S]*input\[type="number"\],[\s\S]*\.url-copy-surface\s*\{[\s\S]*transition:\s*none;/m,
+  );
   expect(popup_css).toMatch(/\.poll-indicator--pulse\s*\{[\s\S]*animation:\s*none;/m);
 });

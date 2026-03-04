@@ -534,6 +534,43 @@ test("extension popup controls connections, sessions, and bridge port", async ()
       expect(await snapshot_chip.isVisible()).toBe(true);
       expect((await snapshot_chip.textContent()) ?? "").toContain("Snapshot");
 
+      await popup_page.evaluate(() => {
+        (globalThis as { __popup_test_copied_url__?: string | null }).__popup_test_copied_url__ = null;
+        const clipboard_mock = {
+          async writeText(value: string): Promise<void> {
+            (globalThis as { __popup_test_copied_url__?: string | null }).__popup_test_copied_url__ = value;
+          },
+        };
+
+        try {
+          Object.defineProperty(globalThis.navigator, "clipboard", {
+            configurable: true,
+            value: clipboard_mock,
+          });
+        } catch {
+          (globalThis.navigator as Navigator & { clipboard?: typeof clipboard_mock }).clipboard = clipboard_mock;
+        }
+      });
+
+      const copy_bridge_url_button = popup_page.locator('[data-testid="copy-bridge-url-btn"]');
+      expect(await copy_bridge_url_button.isVisible()).toBe(true);
+      await copy_bridge_url_button.click();
+
+      await wait_for_condition(
+        () =>
+          popup_page.evaluate(() => {
+            const copy_status = document.querySelector('[data-testid="bridge-url-copy-status"]');
+            return copy_status instanceof HTMLElement && String(copy_status.textContent || "").includes("Copied");
+          }),
+        30_000,
+        150,
+      );
+
+      const copied_bridge_url = await popup_page.evaluate(() => {
+        return (globalThis as { __popup_test_copied_url__?: string | null }).__popup_test_copied_url__ ?? null;
+      });
+      expect(copied_bridge_url).toBe("ws://127.0.0.1:37777/extension");
+
       const motion_profile = await popup_page.evaluate(() => {
         const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
         const poll_indicator = document.getElementById("poll-indicator");
