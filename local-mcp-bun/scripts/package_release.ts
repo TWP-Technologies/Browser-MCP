@@ -22,6 +22,8 @@ interface package_cli_options {
   clean: boolean;
 }
 
+const release_asset_prefix = "local-mcp";
+
 function read_json_file<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }
@@ -139,7 +141,7 @@ function format_server_artifact_file_name(version: string): string {
   const platform_label = resolve_platform_label();
   const arch_label = resolve_arch_label();
   const extension = process.platform === "win32" ? ".exe" : "";
-  return `local-mcp-bun-v${version}-${platform_label}-${arch_label}${extension}`;
+  return `${release_asset_prefix}-v${version}-${platform_label}-${arch_label}${extension}`;
 }
 
 function collect_directory_files(directory_path: string): string[] {
@@ -217,7 +219,7 @@ function package_extension_bundle(project_root: string, output_dir: string, vers
   mkdirSync(stage_dir, { recursive: true });
   copy_extension_release_files(project_root, stage_dir);
 
-  const extension_archive_path = resolve(output_dir, `local-mcp-bun-chrome-extension-v${version}.zip`);
+  const extension_archive_path = resolve(output_dir, `${release_asset_prefix}-chrome-extension-v${version}.zip`);
   create_zip_archive_from_directory(stage_dir, extension_archive_path);
   rmSync(stage_dir, { recursive: true, force: true });
 
