@@ -9,6 +9,7 @@ This extension opens a local WebSocket connection to `ws://127.0.0.1:37777/exten
 - Reports open tabs to the server.
 - Handles `attach_to_tab` and `detach_from_tab` requests via `chrome.debugger`.
 - Emits detach notices on `chrome.debugger.onDetach` and tab close.
+- Popup controls: enable/disable agent connections, inspect active locks/sessions, update bridge port, and copy full bridge URL.
 
 ## Install
 

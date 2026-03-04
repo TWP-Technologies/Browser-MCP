@@ -26,6 +26,27 @@ bun run src/index.ts
 - `MCP_AUTH_TOKEN=auto` or `MCP_AUTH_AUTO=1` enables token auth with auto-generated one-time token (printed at startup).
 - If auth env vars are not set, auth remains disabled (local loopback boundary still enforced).
 
+### MCP Auth Token: Is It Required?
+
+- By default, token auth is **not required**. Sessions can initialize without a token when `MCP_AUTH_TOKEN`/`MCP_AUTH_AUTO` are unset.
+- If you set `MCP_AUTH_TOKEN=<value>`, clients **must** pass the same value in `initialize.params.token`.
+- If you set `MCP_AUTH_TOKEN=auto` (or `MCP_AUTH_AUTO=1`), the server prints a generated one-time token on startup:
+  - `[auth] generated one-time MCP token for this server run: auto-...`
+  - Use that exact token in `initialize.params.token`.
+
+## Packaging
+
+- Build both artifacts (server binary + extension zip):
+  - `just package`
+- Build only server binary:
+  - `just package-server`
+- Build only extension zip:
+  - `just package-extension`
+- Verify release version matches `package.json` and `chrome-extension/manifest.json`:
+  - `just package-version-check version=v0.1.0`
+
+Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SUMS.txt`.
+
 ## Test
 
 ```bash
