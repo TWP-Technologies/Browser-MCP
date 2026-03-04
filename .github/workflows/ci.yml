@@ -55,7 +55,7 @@ jobs:
 
       - name: Run hard quality gate
         id: hard_gate
-        run: bun run test:hard-gate:ci
+        run: bun run test:hard-gate
         working-directory: local-mcp-bun
 
       - name: Write CI evidence
