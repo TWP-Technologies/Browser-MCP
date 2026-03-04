@@ -1,5 +1,5 @@
 {
-  "name": "local-mcp-bun",
+  "name": "@TWP-Technologies/Browser-MCP",
   "version": "0.1.1",
   "private": true,
   "type": "module",
