@@ -142,14 +142,14 @@ export type extension_inbound =
 
 export interface json_rpc_request {
   jsonrpc: "2.0";
-  id: string | number;
+  id?: string | number | null;
   method: string;
   params?: Record<string, unknown>;
 }
 
 export interface json_rpc_response {
   jsonrpc: "2.0";
-  id: string | number;
+  id: string | number | null;
   result?: unknown;
   error?: {
     code: number;
