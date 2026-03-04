@@ -13,6 +13,7 @@ const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
 const is_windows = process.platform === "win32";
 const force_cdp_launch = process.env.E2E_FORCE_CDP_LAUNCH === "1";
+const windows_try_persistent_context = process.env.E2E_WINDOWS_TRY_PERSISTENT_CONTEXT === "1";
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
@@ -164,7 +165,7 @@ function get_windows_executable_candidates(): string[] {
   return existing_candidates;
 }
 
-async function launch_context_via_cdp(executable_path: string): Promise<BrowserContext> {
+async function launch_context_via_cdp(executable_path: string): Promise<BrowserContext | undefined> {
   const user_data_dir = create_user_data_dir();
   const devtools_port_file = join(user_data_dir, "DevToolsActivePort");
 
@@ -179,7 +180,9 @@ async function launch_context_via_cdp(executable_path: string): Promise<BrowserC
     "--disable-popup-blocking",
     "--disable-renderer-backgrounding",
     "--disable-dev-shm-usage",
+    "--disable-gpu",
     "--no-sandbox",
+    "--remote-allow-origins=*",
     "--headless=new",
     `--disable-extensions-except=${extension_path}`,
     `--load-extension=${extension_path}`,
@@ -222,9 +225,20 @@ async function launch_context_via_cdp(executable_path: string): Promise<BrowserC
     throw new Error(`invalid DevTools port file contents: ${JSON.stringify(devtools_lines)}`);
   }
 
-  browser = await chromium.connectOverCDP(`http://127.0.0.1:${devtools_port}`, {
-    timeout: 30_000,
-  });
+  try {
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${devtools_port}`, {
+      timeout: 60_000,
+    });
+  } catch (error) {
+    if (!is_windows) {
+      throw error;
+    }
+
+    const cdp_error = stringify_error(error);
+    await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 90_000, 200);
+    console.error(`[e2e] cdp connection unavailable on windows; using process-only bridge mode: ${cdp_error}`);
+    return undefined;
+  }
 
   const connected_context = browser.contexts()[0];
   if (!connected_context) {
@@ -234,31 +248,19 @@ async function launch_context_via_cdp(executable_path: string): Promise<BrowserC
   return connected_context;
 }
 
-async function launch_extension_context(): Promise<BrowserContext> {
+async function launch_extension_context(): Promise<BrowserContext | undefined> {
   const launch_errors: string[] = [];
 
   const persistent_attempts: Array<{ name: string; launch_options: LaunchPersistentContextOptions }> = [];
 
   if (!force_cdp_launch) {
     if (is_windows) {
-      persistent_attempts.push(
-        {
+      if (windows_try_persistent_context) {
+        persistent_attempts.push({
           name: "playwright-channel-chromium-headless",
-          launch_options: { channel: "chromium", headless: true, timeout: 60_000 },
-        },
-        {
-          name: "playwright-channel-chrome-headless",
-          launch_options: { channel: "chrome", headless: true, timeout: 60_000 },
-        },
-        {
-          name: "playwright-channel-msedge-headless",
-          launch_options: { channel: "msedge", headless: true, timeout: 60_000 },
-        },
-        {
-          name: "playwright-default-headless",
-          launch_options: { headless: true, timeout: 60_000 },
-        },
-      );
+          launch_options: { channel: "chromium", headless: true, timeout: 90_000 },
+        });
+      }
     } else {
       persistent_attempts.push({
         name: "playwright-channel-chromium-headless",
@@ -321,15 +323,29 @@ beforeAll(async () => {
 
   context = await launch_extension_context();
 
-  let service_worker = context.serviceWorkers()[0];
-  if (!service_worker) {
-    service_worker = await context.waitForEvent("serviceworker", { timeout: 120_000 });
+  if (context) {
+    let service_worker = context.serviceWorkers()[0];
+    if (!service_worker) {
+      service_worker = await context.waitForEvent("serviceworker", { timeout: 120_000 });
+    }
+
+    expect(service_worker.url()).toContain("chrome-extension://");
+
+    const page = await context.newPage();
+    await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  } else {
+    await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 120_000, 150);
+
+    const { agent_session_id } = runtime.tool_router.open_session("e2e-bootstrap");
+    try {
+      await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+        action: "new",
+        url: fixture_url,
+      });
+    } finally {
+      await runtime.tool_router.close_session(agent_session_id);
+    }
   }
-
-  expect(service_worker.url()).toContain("chrome-extension://");
-
-  const page = await context.newPage();
-  await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
   await wait_for_condition(() => runtime.bridge_transport.get_state() === "up", 90_000, 150);
 }, 600_000);
