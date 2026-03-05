@@ -2,6 +2,10 @@
 
 Modified by [KnotFalse].
 
+For user-facing install, client setup, and privacy policy, start at:
+- `../README.md`
+- `../PRIVACY.md`
+
 This project provides a local-only MCP server that multiplexes multiple agent sessions through one shared browser extension connection while enforcing per-tab debugger locks.
 
 ## Key Guarantees
@@ -106,5 +110,6 @@ Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SU
 
 ```bash
 bunx playwright install chromium
+bun run lint:docs
 bun run test:hard-gate
 ```
