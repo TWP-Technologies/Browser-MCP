@@ -17,6 +17,7 @@
     "test:concurrency": "bun test tests/concurrency",
     "test:hard-gate": "bun run test:unit && bun run test:integration && bun run test:e2e && bun run test:fault && bun run test:concurrency",
     "lint:spec": "bun run scripts/validate_living_spec.ts",
+    "lint:docs": "bun run scripts/validate_public_docs.ts",
     "lint:compliance": "bun run scripts/compliance_scan.ts",
     "ci:evidence": "bun run scripts/write_ci_evidence.ts",
     "release:check-version": "bun run scripts/check_release_version_sync.ts",

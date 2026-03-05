@@ -30,10 +30,14 @@ server-auth-auto:
 
 lint:
   cd {{project}} && bun run lint:spec
+  cd {{project}} && bun run lint:docs
   cd {{project}} && bun run lint:compliance
 
 lint-spec:
   cd {{project}} && bun run lint:spec
+
+lint-docs:
+  cd {{project}} && bun run lint:docs
 
 lint-compliance:
   cd {{project}} && bun run lint:compliance

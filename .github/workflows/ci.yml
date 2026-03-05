@@ -49,6 +49,10 @@ jobs:
         run: bun run lint:spec
         working-directory: local-mcp-bun
 
+      - name: Validate public onboarding and privacy docs
+        run: bun run lint:docs
+        working-directory: local-mcp-bun
+
       - name: Validate legal and branding compliance
         run: bun run lint:compliance
         working-directory: local-mcp-bun
