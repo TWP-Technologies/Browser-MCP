@@ -9,7 +9,6 @@
     "storage",
     "alarms",
     "scripting",
-    "webNavigation",
     "management",
     "activeTab"
   ],
