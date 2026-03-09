@@ -1,0 +1,2 @@
+140719bee8f90bd504f7a1d7616c0794a25cfd2f0923863616c324fa4715b1ff  chrome-browser-mcp-v0.2.3-linux-x64
+f6a3fafb38195c58edcbfafe956ae8c65a6df1082df1fca608d9f09ef29c825e  chrome-browser-mcp-chrome-extension-v0.2.3.zip

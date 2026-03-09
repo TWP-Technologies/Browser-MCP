@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Use for AI Agents",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A local-only extension bridge for multiplexed browser MCP. Modified by [KnotFalse]; inspired by Blueprint MCP",
   "permissions": [
     "tabs",
