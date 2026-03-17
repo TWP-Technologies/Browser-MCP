@@ -128,6 +128,110 @@ const forbidden_replay_header_names = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const network_body_cache_max_entries = 24;
+const network_body_cache_max_bytes = 2 * 1024 * 1024;
+
+function is_text_like_content_type(content_type) {
+  if (typeof content_type !== "string" || content_type.length === 0) {
+    return true;
+  }
+
+  const normalized = content_type.toLowerCase();
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("xml") ||
+    normalized.includes("javascript") ||
+    normalized.includes("svg") ||
+    normalized.includes("x-www-form-urlencoded")
+  );
+}
+
+function estimate_text_size(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
+}
+
+function estimate_base64_size(value) {
+  const normalized = String(value || "");
+  if (!normalized) {
+    return 0;
+  }
+
+  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+function approximate_network_body_size(request) {
+  if (typeof request?.response_body === "string") {
+    return estimate_text_size(request.response_body);
+  }
+
+  if (typeof request?.response_body_base64 === "string") {
+    return estimate_base64_size(request.response_body_base64);
+  }
+
+  return 0;
+}
+
+function clear_cached_network_body(request) {
+  delete request.response_body;
+  delete request.response_body_base64;
+  delete request.response_body_cached_at;
+}
+
+function prune_network_body_cache(tab_id) {
+  const requests = Array.from(get_network_store(tab_id).values()).filter(
+    (entry) => typeof entry?.response_body_cached_at === "number" && approximate_network_body_size(entry) > 0,
+  );
+
+  let total_bytes = requests.reduce((sum, entry) => sum + approximate_network_body_size(entry), 0);
+  requests.sort((left, right) => Number(left.response_body_cached_at || 0) - Number(right.response_body_cached_at || 0));
+
+  while (requests.length > network_body_cache_max_entries || total_bytes > network_body_cache_max_bytes) {
+    const oldest = requests.shift();
+    if (!oldest) {
+      break;
+    }
+
+    total_bytes -= approximate_network_body_size(oldest);
+    clear_cached_network_body(oldest);
+  }
+}
+
+function cache_network_body_payload(tab_id, request_id, payload) {
+  const request = get_network_store(tab_id).get(request_id);
+  if (!request || typeof payload?.body !== "string") {
+    return false;
+  }
+
+  const content_type =
+    typeof request.response_content_type === "string"
+      ? request.response_content_type
+      : typeof request.mime_type === "string"
+        ? request.mime_type
+        : "";
+  if (!is_text_like_content_type(content_type)) {
+    request.response_body_error = `response body unavailable for content-type: ${content_type || "unknown"}`;
+    return false;
+  }
+
+  const estimated_bytes = payload.base64Encoded ? estimate_base64_size(payload.body) : estimate_text_size(payload.body);
+  if (estimated_bytes > network_body_cache_max_bytes) {
+    request.response_body_error = `response body exceeds in-memory cache budget: ${estimated_bytes}`;
+    return false;
+  }
+
+  clear_cached_network_body(request);
+  if (payload.base64Encoded) {
+    request.response_body_base64 = payload.body;
+  } else {
+    request.response_body = payload.body;
+  }
+  request.response_body_cached_at = Date.now();
+  delete request.response_body_error;
+  prune_network_body_cache(tab_id);
+  return true;
+}
 
 function register_element_ref(tab_id, descriptor) {
   const store = get_element_ref_store(tab_id);
@@ -319,22 +423,9 @@ function register_debugger_event_listener() {
       existing.finished = true;
       existing.encoded_data_length = params?.encodedDataLength;
       existing.completed_at = Date.now();
-      if (attached_tab_ids.has(tab_id)) {
-        try {
-          const response_body = await chrome.debugger.sendCommand(
-            { tabId: tab_id },
-            "Network.getResponseBody",
-            { requestId: request_id },
-          );
-          if (response_body?.base64Encoded) {
-            existing.response_body_base64 = response_body.body;
-          } else {
-            existing.response_body = response_body?.body ?? "";
-          }
-        } catch (error) {
-          existing.response_body_error = error instanceof Error ? error.message : String(error);
-        }
-      }
+      clear_cached_network_body(existing);
+      delete existing.response_body_error;
+      delete existing.response_body_cached_at;
       return;
     }
 
@@ -1488,8 +1579,207 @@ async function resolve_selector_target(args, tab_id, selector_field = "selector"
   }
 
   const entry = resolve_element_ref_entry(tab_id, element_ref);
+  let resolved_selector = "";
+  if (typeof entry.unique_selector === "string" && entry.unique_selector.length > 0) {
+    resolved_selector = await execute_in_tab(tab_id, (incoming_selector) => {
+      try {
+        return document.querySelectorAll(incoming_selector).length === 1 ? incoming_selector : "";
+      } catch {
+        return "";
+      }
+    }, entry.unique_selector);
+  }
+
+  if (!resolved_selector) {
+    resolved_selector = await execute_in_tab(tab_id, (descriptor) => {
+      function normalize_text(value, max_length = 220) {
+        return String(value || "").replace(/\s+/gu, " ").trim().slice(0, max_length);
+      }
+
+      function escape_css_identifier(value) {
+        const raw_value = String(value);
+        if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
+          return globalThis.CSS.escape(raw_value);
+        }
+
+        return raw_value.replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+      }
+
+      function infer_role(element) {
+        const explicit_role = element.getAttribute("role");
+        if (explicit_role) {
+          return explicit_role;
+        }
+
+        const tag = element.tagName.toLowerCase();
+        if (tag === "a" && element.getAttribute("href")) {
+          return "link";
+        }
+        if (tag === "button") {
+          return "button";
+        }
+        if (tag === "select") {
+          return "combobox";
+        }
+        if (tag === "textarea") {
+          return "textbox";
+        }
+        if (tag === "input") {
+          const type = String(element.getAttribute("type") || "text").toLowerCase();
+          if (type === "checkbox") {
+            return "checkbox";
+          }
+          if (type === "radio") {
+            return "radio";
+          }
+          if (type === "button" || type === "submit" || type === "reset") {
+            return "button";
+          }
+          return "textbox";
+        }
+        if (/^h[1-6]$/u.test(tag)) {
+          return "heading";
+        }
+        return tag;
+      }
+
+      function infer_name(element) {
+        const aria_label = normalize_text(element.getAttribute("aria-label"), 160);
+        if (aria_label) {
+          return aria_label;
+        }
+
+        for (const candidate of [
+          element.getAttribute("placeholder"),
+          element.getAttribute("title"),
+          "value" in element ? element.value : "",
+          element.innerText || element.textContent,
+        ]) {
+          const normalized = normalize_text(candidate, 160);
+          if (normalized) {
+            return normalized;
+          }
+        }
+
+        return "";
+      }
+
+      function bounds_match(element, expected_bounds) {
+        if (!expected_bounds || typeof expected_bounds !== "object") {
+          return true;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const scroll_x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+        const scroll_y = window.pageYOffset || document.documentElement.scrollTop || 0;
+        const current_bounds = {
+          x: Math.max(0, Math.round(rect.left + scroll_x)),
+          y: Math.max(0, Math.round(rect.top + scroll_y)),
+          width: Math.max(0, Math.round(rect.width)),
+          height: Math.max(0, Math.round(rect.height)),
+        };
+
+        return (
+          Math.abs(current_bounds.x - Number(expected_bounds.x || 0)) <= 8 &&
+          Math.abs(current_bounds.y - Number(expected_bounds.y || 0)) <= 8 &&
+          Math.abs(current_bounds.width - Number(expected_bounds.width || 0)) <= 8 &&
+          Math.abs(current_bounds.height - Number(expected_bounds.height || 0)) <= 8
+        );
+      }
+
+      function selector_for(element) {
+        if (element.id) {
+          return `#${escape_css_identifier(element.id)}`;
+        }
+
+        const data_test_id = element.getAttribute("data-testid");
+        if (data_test_id) {
+          return `[data-testid="${escape_css_identifier(data_test_id)}"]`;
+        }
+
+        const name = element.getAttribute("name");
+        if (name) {
+          return `${element.tagName.toLowerCase()}[name="${escape_css_identifier(name)}"]`;
+        }
+
+        const segments = [];
+        let current = element;
+        while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+          let segment = current.tagName.toLowerCase();
+          const parent = current.parentElement;
+          if (parent) {
+            const same_tag_siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current.tagName);
+            if (same_tag_siblings.length > 1) {
+              segment += `:nth-of-type(${same_tag_siblings.indexOf(current) + 1})`;
+            }
+          }
+          segments.unshift(segment);
+          current = current.parentElement;
+        }
+
+        return ["body", ...segments].join(" > ");
+      }
+
+      const selector = typeof descriptor?.selector === "string" ? descriptor.selector : "";
+      if (!selector) {
+        return "";
+      }
+
+      let matches = [];
+      try {
+        matches = Array.from(document.querySelectorAll(selector));
+      } catch {
+        return "";
+      }
+
+      const filtered = matches.filter((element) => {
+        if (typeof descriptor?.tag === "string" && descriptor.tag.length > 0 && descriptor.tag !== element.tagName.toLowerCase()) {
+          return false;
+        }
+
+        if (typeof descriptor?.role === "string" && descriptor.role.length > 0 && descriptor.role !== infer_role(element)) {
+          return false;
+        }
+
+        if (typeof descriptor?.name === "string" && descriptor.name.length > 0) {
+          const current_name = infer_name(element);
+          if (current_name !== descriptor.name) {
+            return false;
+          }
+        }
+
+        if (typeof descriptor?.text_excerpt === "string" && descriptor.text_excerpt.length > 0) {
+          const current_text = normalize_text(element.innerText || element.textContent, 220);
+          if (
+            current_text !== descriptor.text_excerpt &&
+            !current_text.includes(descriptor.text_excerpt) &&
+            !descriptor.text_excerpt.includes(current_text)
+          ) {
+            return false;
+          }
+        }
+
+        return bounds_match(element, descriptor?.bounds);
+      });
+
+      if (filtered.length !== 1) {
+        return "";
+      }
+
+      return selector_for(filtered[0]);
+    }, entry);
+  }
+
+  if (!resolved_selector) {
+    throw create_extension_error("STALE_ELEMENT_REFERENCE", `element_ref is stale: ${element_ref}`, {
+      tab_id,
+      element_ref,
+      recovery_hint: "refresh browser_snapshot or browser_lookup and retry",
+    });
+  }
+
   return {
-    selector: entry.selector,
+    selector: resolved_selector,
     element_ref,
   };
 }
@@ -1573,14 +1863,30 @@ async function wait_for_selector(tab_id, selector, timeout_ms) {
   const started_at = Date.now();
   while (Date.now() - started_at < timeout_ms) {
     const found = await execute_in_tab(tab_id, (incoming_selector) => {
+      function is_visible(element) {
+        if (!(element instanceof Element) || !element.isConnected) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const opacity = Number(style.opacity);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.visibility !== "collapse" &&
+          (Number.isNaN(opacity) || opacity > 0)
+        );
+      }
+
       const target = document.querySelector(incoming_selector);
       if (!target) {
         return false;
       }
 
-      const rect = target.getBoundingClientRect();
-      const style = getComputedStyle(target);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      return is_visible(target);
     }, selector);
 
     if (found) {
@@ -1627,6 +1933,24 @@ async function get_viewport_capture_metrics(tab_id) {
 
 async function install_clickable_highlight_overlay(tab_id) {
   return await execute_in_tab(tab_id, () => {
+    function is_visible(element) {
+      if (!(element instanceof Element) || !element.isConnected) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const opacity = Number(style.opacity);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.visibility !== "collapse" &&
+        (Number.isNaN(opacity) || opacity > 0)
+      );
+    }
+
     const overlay_id = `local-mcp-clickable-overlay-${Date.now()}-${Math.round(Math.random() * 100000)}`;
     const existing = document.getElementById(overlay_id);
     if (existing) {
@@ -1662,12 +1986,11 @@ async function install_clickable_highlight_overlay(tab_id) {
     let count = 0;
 
     for (const element of Array.from(document.querySelectorAll(clickable_selector))) {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") {
+      if (!is_visible(element)) {
         continue;
       }
 
+      const rect = element.getBoundingClientRect();
       const box = document.createElement("div");
       box.style.position = "absolute";
       box.style.left = `${Math.max(0, rect.left + scroll_x)}px`;
@@ -1778,11 +2101,45 @@ function decode_network_body_text(request) {
   return "";
 }
 
+function decode_network_body_payload(payload) {
+  if (typeof payload?.body !== "string") {
+    return "";
+  }
+
+  if (payload?.base64Encoded === true) {
+    try {
+      return atob(payload.body);
+    } catch {
+      return "";
+    }
+  }
+
+  return payload.body;
+}
+
 async function execute_browser_snapshot(tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   reset_element_refs_for_tab(resolved_tab_id);
 
   const page_snapshot = await execute_in_tab(resolved_tab_id, () => {
+    function is_visible(element) {
+      if (!(element instanceof Element) || !element.isConnected) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const opacity = Number(style.opacity);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.visibility !== "collapse" &&
+        (Number.isNaN(opacity) || opacity > 0)
+      );
+    }
+
     function escape_css_identifier(value) {
       const raw_value = String(value);
       if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
@@ -1904,34 +2261,7 @@ async function execute_browser_snapshot(tab_id) {
       );
     }
 
-    function is_visible(element) {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      const opacity = Number(style.opacity);
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        (Number.isNaN(opacity) || opacity > 0)
-      );
-    }
-
-    function selector_for(element) {
-      if (element.id) {
-        return `#${escape_css_identifier(element.id)}`;
-      }
-
-      const data_test_id = element.getAttribute("data-testid");
-      if (data_test_id) {
-        return `[data-testid="${escape_css_identifier(data_test_id)}"]`;
-      }
-
-      const name = element.getAttribute("name");
-      if (name) {
-        return `${element.tagName.toLowerCase()}[name="${escape_css_identifier(name)}"]`;
-      }
-
+    function build_path_selector(element) {
       const segments = [];
       let current = element;
       while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
@@ -1948,6 +2278,51 @@ async function execute_browser_snapshot(tab_id) {
       }
 
       return ["body", ...segments].join(" > ");
+    }
+
+    function describe_selectors_for(element) {
+      const candidates = [];
+      if (element.id) {
+        candidates.push(`#${escape_css_identifier(element.id)}`);
+      }
+
+      const data_test_id = element.getAttribute("data-testid");
+      if (data_test_id) {
+        candidates.push(`[data-testid="${escape_css_identifier(data_test_id)}"]`);
+      }
+
+      const name = element.getAttribute("name");
+      if (name) {
+        candidates.push(`${element.tagName.toLowerCase()}[name="${escape_css_identifier(name)}"]`);
+      }
+
+      candidates.push(build_path_selector(element));
+
+      let selector = "";
+      let unique_selector;
+      for (const candidate of candidates) {
+        if (!candidate) {
+          continue;
+        }
+
+        if (!selector) {
+          selector = candidate;
+        }
+
+        try {
+          if (document.querySelectorAll(candidate).length === 1) {
+            unique_selector = candidate;
+            break;
+          }
+        } catch {
+          // Ignore invalid selector candidates.
+        }
+      }
+
+      return {
+        selector: selector || element.tagName.toLowerCase(),
+        unique_selector,
+      };
     }
 
     function depth_for(element) {
@@ -1995,19 +2370,81 @@ async function execute_browser_snapshot(tab_id) {
       return state;
     }
 
-    const candidates = [];
-    const max_candidates = 240;
-    for (const element of document.querySelectorAll(
-      "body,header,main,nav,footer,section,article,form,dialog,h1,h2,h3,h4,h5,h6,p,button,a[href],input,select,textarea,label,summary,[role],[tabindex],img,table,th,td,li",
-    )) {
-      candidates.push(element);
-      if (candidates.length >= max_candidates) {
+    function is_candidate(element) {
+      const tag = element.tagName.toLowerCase();
+      if (
+        [
+          "body",
+          "header",
+          "main",
+          "nav",
+          "footer",
+          "section",
+          "article",
+          "form",
+          "dialog",
+          "h1",
+          "h2",
+          "h3",
+          "h4",
+          "h5",
+          "h6",
+          "p",
+          "button",
+          "a",
+          "input",
+          "select",
+          "textarea",
+          "label",
+          "summary",
+          "img",
+          "table",
+          "th",
+          "td",
+          "li",
+        ].includes(tag)
+      ) {
+        return true;
+      }
+
+      if (element.hasAttribute("role") || element.hasAttribute("tabindex") || element.getAttribute("contenteditable") === "true") {
+        return true;
+      }
+
+      return normalize_text(element.textContent, 80).length > 0;
+    }
+
+    const primary_candidates = [document.body];
+    const secondary_candidates = [];
+    const max_discovered = 360;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const element = current;
+      if (!is_candidate(element)) {
+        continue;
+      }
+
+      const tag = element.tagName.toLowerCase();
+      const is_priority =
+        ["button", "a", "input", "select", "textarea", "summary", "main", "nav", "form", "dialog"].includes(tag) ||
+        element.hasAttribute("role") ||
+        element.hasAttribute("tabindex");
+      if (is_priority) {
+        primary_candidates.push(element);
+      } else {
+        secondary_candidates.push(element);
+      }
+
+      if (primary_candidates.length + secondary_candidates.length >= max_discovered) {
         break;
       }
     }
-    const nodes = [];
 
-    for (const element of candidates) {
+    const candidates = primary_candidates.concat(secondary_candidates).slice(0, max_discovered);
+    const nodes = [];
+    const max_scored = 180;
+
+    for (const element of candidates.slice(0, max_scored)) {
       const role = infer_role(element);
       const visible = is_visible(element);
       const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
@@ -2020,6 +2457,8 @@ async function execute_browser_snapshot(tab_id) {
         continue;
       }
 
+      const selectors = describe_selectors_for(element);
+
       nodes.push({
         tag: element.tagName.toLowerCase(),
         role,
@@ -2028,7 +2467,8 @@ async function execute_browser_snapshot(tab_id) {
         text,
         visible,
         interactive,
-        selector: selector_for(element),
+        selector: selectors.selector,
+        unique_selector: selectors.unique_selector,
         depth: depth_for(element),
         bounds: bounds_for(element),
         states: state_for(element, role),
@@ -2052,7 +2492,7 @@ async function execute_browser_snapshot(tab_id) {
       title: document.title,
       viewport,
       nodes,
-      truncated: candidates.length > nodes.length,
+      truncated: primary_candidates.length + secondary_candidates.length > nodes.length,
     };
   });
 
@@ -2061,9 +2501,12 @@ async function execute_browser_snapshot(tab_id) {
         ...node,
         element_ref: register_element_ref(resolved_tab_id, {
           selector: node.selector,
+          unique_selector: node.unique_selector,
           tag: node.tag,
           role: node.role,
           name: node.name,
+          text_excerpt: node.text,
+          bounds: node.bounds,
         }),
       }))
     : [];
@@ -2775,37 +3218,38 @@ async function execute_browser_lookup(args, tab_id) {
     const query = incoming_text.toLowerCase();
     const output = [];
 
+    function is_visible(element) {
+      if (!(element instanceof Element) || !element.isConnected) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const opacity = Number(style.opacity);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.visibility !== "collapse" &&
+        (Number.isNaN(opacity) || opacity > 0)
+      );
+    }
+
     function normalize_text(value, max_length = 220) {
       return String(value || "").replace(/\s+/gu, " ").trim().slice(0, max_length);
     }
 
-    function selector_for(element) {
-      if (element.id) {
-        if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
-          return `#${globalThis.CSS.escape(element.id)}`;
-        }
-
-        return `#${String(element.id).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `)}`;
+    function escape_css_identifier(value) {
+      const raw_value = String(value);
+      if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
+        return globalThis.CSS.escape(raw_value);
       }
 
-      const data_test_id = element.getAttribute("data-testid");
-      if (data_test_id) {
-        const escaped_data_test_id =
-          globalThis.CSS && typeof globalThis.CSS.escape === "function"
-            ? globalThis.CSS.escape(data_test_id)
-            : String(data_test_id).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
-        return `[data-testid="${escaped_data_test_id}"]`;
-      }
+      return raw_value.replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+    }
 
-      const name = element.getAttribute("name");
-      if (name) {
-        const escaped_name =
-          globalThis.CSS && typeof globalThis.CSS.escape === "function"
-            ? globalThis.CSS.escape(name)
-            : String(name).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
-        return `${element.tagName.toLowerCase()}[name="${escaped_name}"]`;
-      }
-
+    function build_path_selector(element) {
       const segments = [];
       let current = element;
       while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
@@ -2823,6 +3267,51 @@ async function execute_browser_lookup(args, tab_id) {
       }
 
       return ["body", ...segments].join(" > ");
+    }
+
+    function describe_selectors_for(element) {
+      const candidates = [];
+      if (element.id) {
+        candidates.push(`#${escape_css_identifier(element.id)}`);
+      }
+
+      const data_test_id = element.getAttribute("data-testid");
+      if (data_test_id) {
+        candidates.push(`[data-testid="${escape_css_identifier(data_test_id)}"]`);
+      }
+
+      const name = element.getAttribute("name");
+      if (name) {
+        candidates.push(`${element.tagName.toLowerCase()}[name="${escape_css_identifier(name)}"]`);
+      }
+
+      candidates.push(build_path_selector(element));
+
+      let selector = "";
+      let unique_selector;
+      for (const candidate of candidates) {
+        if (!candidate) {
+          continue;
+        }
+
+        if (!selector) {
+          selector = candidate;
+        }
+
+        try {
+          if (document.querySelectorAll(candidate).length === 1) {
+            unique_selector = candidate;
+            break;
+          }
+        } catch {
+          // Ignore invalid selector candidates.
+        }
+      }
+
+      return {
+        selector: selector || element.tagName.toLowerCase(),
+        unique_selector,
+      };
     }
 
     function infer_role(element) {
@@ -2859,21 +3348,13 @@ async function execute_browser_lookup(args, tab_id) {
       };
     }
 
-    function is_visible(element) {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      const opacity = Number(style.opacity);
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        (Number.isNaN(opacity) || opacity > 0)
-      );
-    }
-
-    for (const element of Array.from(document.querySelectorAll("body *"))) {
-      const text_value = normalize_text(element.innerText || element.textContent);
+    const candidates = [];
+    const max_candidates = Math.max(incoming_limit * 12, 120);
+    const max_scored = Math.max(incoming_limit * 4, 32);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const element = current;
+      const text_value = normalize_text(element.textContent);
       const name = normalize_text(
         element.getAttribute("aria-label") ||
           element.getAttribute("placeholder") ||
@@ -2887,13 +3368,36 @@ async function execute_browser_lookup(args, tab_id) {
         continue;
       }
 
+      const score =
+        text_value.toLowerCase() === query
+          ? 1
+          : text_value.toLowerCase().startsWith(query) || name.toLowerCase().startsWith(query)
+            ? 0.9
+            : 0.75;
+      candidates.push({
+        element,
+        text: text_value,
+        name,
+        score,
+      });
+
+      if (candidates.length >= max_candidates) {
+        break;
+      }
+    }
+
+    candidates.sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+
+    for (const candidate of candidates.slice(0, max_scored)) {
+      const { element, text: text_value, name, score } = candidate;
       const role = infer_role(element);
       const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
       const visible = is_visible(element);
-      const score = text_value.toLowerCase() === query ? 1 : text_value.toLowerCase().startsWith(query) ? 0.9 : 0.75;
+      const selectors = describe_selectors_for(element);
 
       output.push({
-        selector: selector_for(element),
+        selector: selectors.selector,
+        unique_selector: selectors.unique_selector,
         text: text_value,
         tag: element.tagName.toLowerCase(),
         role,
@@ -2909,7 +3413,7 @@ async function execute_browser_lookup(args, tab_id) {
       }
     }
 
-    return output.sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+    return output;
   }, text, limit);
 
   return {
@@ -2918,11 +3422,65 @@ async function execute_browser_lookup(args, tab_id) {
       ...match,
       element_ref: register_element_ref(resolved_tab_id, {
         selector: match.selector,
+        unique_selector: match.unique_selector,
         tag: match.tag,
         role: match.role,
         name: match.name,
+        text_excerpt: match.text,
+        bounds: match.bounds,
       }),
     })),
+  };
+}
+
+async function load_network_response_body_on_demand(tab_id, request_id, request) {
+  const cached_text = decode_network_body_text(request);
+  if (cached_text || typeof request?.response_body === "string" || typeof request?.response_body_base64 === "string") {
+    return {
+      response_body_text: cached_text,
+      body_available: true,
+      body_cached: true,
+      body_error: undefined,
+    };
+  }
+
+  if (!attached_tab_ids.has(tab_id)) {
+    return {
+      response_body_text: "",
+      body_available: false,
+      body_cached: false,
+      body_error: typeof request?.response_body_error === "string" ? request.response_body_error : "response body unavailable: tab is not attached",
+    };
+  }
+
+  const response_body = await send_debugger_command(tab_id, "Network.getResponseBody", {
+    requestId: request_id,
+  });
+  const response_body_text = decode_network_body_payload(response_body);
+  const content_type =
+    typeof request?.response_content_type === "string"
+      ? request.response_content_type
+      : typeof request?.mime_type === "string"
+        ? request.mime_type
+        : "";
+
+  if (!is_text_like_content_type(content_type)) {
+    request.response_body_error = `response body unavailable for content-type: ${content_type || "unknown"}`;
+    return {
+      response_body_text: "",
+      body_available: false,
+      body_cached: false,
+      body_error: request.response_body_error,
+    };
+  }
+
+  const body_cached = cache_network_body_payload(tab_id, request_id, response_body);
+  delete request.response_body_error;
+  return {
+    response_body_text,
+    body_available: true,
+    body_cached,
+    body_error: undefined,
   };
 }
 
@@ -2952,15 +3510,30 @@ async function execute_browser_verify_element_visible(args, tab_id) {
   const selector = resolved_target.selector;
 
   const visible = await execute_in_tab(resolved_tab_id, (incoming_selector) => {
+    function is_visible(element) {
+      if (!(element instanceof Element) || !element.isConnected) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const opacity = Number(style.opacity);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.visibility !== "collapse" &&
+        (Number.isNaN(opacity) || opacity > 0)
+      );
+    }
+
     const element = document.querySelector(incoming_selector);
     if (!element) {
       return false;
     }
 
-    const rect = element.getBoundingClientRect();
-    const style = getComputedStyle(element);
-
-    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    return is_visible(element);
   }, selector);
 
   return {
@@ -3283,22 +3856,27 @@ async function execute_browser_network_requests(args, tab_id) {
     }
 
     const details = requests_map.get(request_id);
-    if (details && !decode_network_body_text(details) && attached_tab_ids.has(resolved_tab_id)) {
+    let body_state = {
+      response_body_text: decode_network_body_text(details),
+      body_available: Boolean(details && (typeof details.response_body === "string" || typeof details.response_body_base64 === "string")),
+      body_cached: Boolean(details && typeof details.response_body_cached_at === "number"),
+      body_error: typeof details?.response_body_error === "string" ? details.response_body_error : undefined,
+    };
+    if (details && !body_state.body_available) {
       try {
-        const response_body = await send_debugger_command(resolved_tab_id, "Network.getResponseBody", {
-          requestId: request_id,
-        });
-        if (response_body?.base64Encoded) {
-          details.response_body_base64 = response_body.body;
-        } else {
-          details.response_body = response_body?.body ?? "";
-        }
+        body_state = await load_network_response_body_on_demand(resolved_tab_id, request_id, details);
       } catch (error) {
         details.response_body_error = error instanceof Error ? error.message : String(error);
+        body_state = {
+          response_body_text: "",
+          body_available: false,
+          body_cached: false,
+          body_error: details.response_body_error,
+        };
       }
     }
 
-    const response_body_text = decode_network_body_text(details);
+    const response_body_text = body_state.response_body_text;
     let json_path_result;
     let json_path_error;
     if (typeof args?.jsonPath === "string" && args.jsonPath.length > 0 && response_body_text) {
@@ -3313,6 +3891,9 @@ async function execute_browser_network_requests(args, tab_id) {
       tab_id: resolved_tab_id,
       request: details ?? null,
       response_body_text,
+      body_available: body_state.body_available,
+      body_cached: body_state.body_cached,
+      body_error: body_state.body_error,
       json_path_result,
       json_path_error,
     };
@@ -3399,7 +3980,13 @@ async function execute_browser_network_requests(args, tab_id) {
     total: rows.length,
     offset,
     limit,
-    requests: rows.slice(offset, offset + limit),
+    requests: rows.slice(offset, offset + limit).map((row) => {
+      const cloned = { ...row };
+      delete cloned.response_body;
+      delete cloned.response_body_base64;
+      delete cloned.response_body_cached_at;
+      return cloned;
+    }),
   };
 }
 

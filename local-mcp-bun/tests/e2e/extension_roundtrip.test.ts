@@ -9,6 +9,7 @@ import { websocket_bridge_transport } from "../../src/bridge_transport";
 import { tool_error } from "../../src/errors";
 import { local_mcp_runtime } from "../../src/runtime";
 import { create_workspace_output_dir } from "../helpers/artifact_output";
+import { serve_on_available_loopback_port } from "../helpers/loopback_server";
 
 const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
@@ -188,57 +189,41 @@ function find_fixture_tab(tabs: Array<Record<string, unknown>>): Record<string, 
   );
 }
 
-function start_fixture_server(): Bun.Server {
-  for (let port = 37940; port <= 37980; port += 1) {
-    if (port === test_bridge_port) {
-      continue;
-    }
-
-    try {
-      return Bun.serve({
-        port,
-        hostname: "127.0.0.1",
-        fetch(request) {
-          const url = new URL(request.url);
-          if (url.pathname === "/api/items") {
-            return new Response(
-              JSON.stringify({
-                data: {
-                  items: [
-                    {
-                      id: 1,
-                      name: "Fixture Widget",
-                    },
-                  ],
+async function start_fixture_server(): Promise<Bun.Server> {
+  return await serve_on_available_loopback_port({
+    excluded_ports: [test_bridge_port],
+    fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/items") {
+        return new Response(
+          JSON.stringify({
+            data: {
+              items: [
+                {
+                  id: 1,
+                  name: "Fixture Widget",
                 },
-              }),
-              {
-                headers: {
-                  "content-type": "application/json",
-                },
-              },
-            );
-          }
-          if (url.pathname === "/fixture") {
-            return new Response(fixture_html, {
-              headers: {
-                "content-type": "text/html; charset=utf-8",
-              },
-            });
-          }
-
-          return new Response("not found", { status: 404 });
-        },
-      });
-    } catch (error) {
-      const message = stringify_error(error);
-      if (!message.includes("EADDRINUSE")) {
-        throw error;
+              ],
+            },
+          }),
+          {
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
       }
-    }
-  }
+      if (url.pathname === "/fixture") {
+        return new Response(fixture_html, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+          },
+        });
+      }
 
-  throw new Error("failed to allocate e2e fixture server port");
+      return new Response("not found", { status: 404 });
+    },
+  });
 }
 
 function parse_png_dimensions(data_base64: string): { width: number; height: number } {
@@ -467,7 +452,7 @@ async function launch_extension_context(): Promise<BrowserContext | undefined> {
 }
 
 beforeAll(async () => {
-  fixture_server = start_fixture_server();
+  fixture_server = await start_fixture_server();
   fixture_url = `${fixture_url_prefix}${fixture_server.port}/fixture`;
 
   runtime = new local_mcp_runtime({

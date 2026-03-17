@@ -113,3 +113,29 @@ test("in-memory browser_navigate reload remains a valid no-op", async () => {
   expect(response.action).toBe("reload");
   expect(response.url).toBe("https://example.com");
 });
+
+test("in-memory element_ref replay fails closed when the handle is not replayable", async () => {
+  const bridge = create_bridge();
+  (bridge as unknown as {
+    element_refs_by_tab: Map<number, Map<string, { selector: string; replayable: boolean }>>;
+  }).element_refs_by_tab.set(
+    101,
+    new Map([
+      [
+        "el_101_1_1",
+        {
+          selector: "button.primary-action",
+          replayable: false,
+        },
+      ],
+    ]),
+  );
+
+  try {
+    await bridge.call_tool("browser_interact", { action: "click", element_ref: "el_101_1_1" }, "agent-a", 101);
+    throw new Error("expected stale element_ref to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("STALE_ELEMENT_REFERENCE");
+  }
+});

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type LaunchPersistentContextOptions, type Worker } from "playwright";
+import { serve_on_available_loopback_port } from "../helpers/loopback_server";
 
 const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
@@ -113,34 +114,21 @@ function create_user_data_dir(): string {
   return user_data_dir;
 }
 
-function start_fixture_server(): Bun.Server {
-  for (let port = 38020; port <= 38060; port += 1) {
-    try {
-      return Bun.serve({
-        port,
-        hostname: "127.0.0.1",
-        fetch(request) {
-          const url = new URL(request.url);
-          if (url.pathname === "/fixture") {
-            return new Response(fixture_html, {
-              headers: {
-                "content-type": "text/html; charset=utf-8",
-              },
-            });
-          }
-
-          return new Response("not found", { status: 404 });
-        },
-      });
-    } catch (error) {
-      const message = stringify_error(error);
-      if (!message.includes("EADDRINUSE")) {
-        throw error;
+async function start_fixture_server(): Promise<Bun.Server> {
+  return await serve_on_available_loopback_port({
+    fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/fixture") {
+        return new Response(fixture_html, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+          },
+        });
       }
-    }
-  }
 
-  throw new Error("failed to allocate direct screenshot fixture server port");
+      return new Response("not found", { status: 404 });
+    },
+  });
 }
 
 async function cleanup_user_data_dir(path: string): Promise<void> {
@@ -456,7 +444,7 @@ async function capture_screenshot(
 }
 
 beforeAll(async () => {
-  fixture_server = start_fixture_server();
+  fixture_server = await start_fixture_server();
   fixture_url = `${fixture_url_prefix}${fixture_server.port}/fixture`;
   context = await launch_extension_context();
 }, 300_000);

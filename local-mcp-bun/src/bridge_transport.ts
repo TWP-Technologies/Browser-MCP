@@ -53,11 +53,17 @@ interface ws_data {
   connected_at: string;
 }
 
+interface in_memory_element_ref_entry {
+  selector: string;
+  unique_selector?: string;
+  replayable?: boolean;
+}
+
 export class in_memory_bridge_transport implements bridge_transport {
   private state: bridge_state;
   private readonly tabs_by_id: Map<number, tab_snapshot>;
   private readonly request_log: extension_request[];
-  private readonly element_refs_by_tab: Map<number, Map<string, string>>;
+  private readonly element_refs_by_tab: Map<number, Map<string, in_memory_element_ref_entry>>;
   private readonly element_ref_revision_by_tab: Map<number, number>;
   private on_detach_handler?: (tab_id: number, reason: string) => void;
   private on_state_change_handler?: (state: bridge_state) => void;
@@ -72,7 +78,7 @@ export class in_memory_bridge_transport implements bridge_transport {
     this.state = "up";
     this.tabs_by_id = new Map<number, tab_snapshot>();
     this.request_log = [];
-    this.element_refs_by_tab = new Map<number, Map<string, string>>();
+    this.element_refs_by_tab = new Map<number, Map<string, in_memory_element_ref_entry>>();
     this.element_ref_revision_by_tab = new Map<number, number>();
     this.last_connections_snapshot = null;
   }
@@ -378,10 +384,26 @@ export class in_memory_bridge_transport implements bridge_transport {
 
       const tab = this.require_tab(tab_id, "browser_snapshot");
       this.reset_element_refs_for_tab(tab_id);
-      const body_ref = this.register_element_ref(tab_id, "body");
-      const heading_ref = this.register_element_ref(tab_id, "main h1");
-      const button_ref = this.register_element_ref(tab_id, "button.primary-action");
-      const link_ref = this.register_element_ref(tab_id, "a.primary-link");
+      const body_ref = this.register_element_ref(tab_id, {
+        selector: "body",
+        unique_selector: "body",
+        replayable: true,
+      });
+      const heading_ref = this.register_element_ref(tab_id, {
+        selector: "main h1",
+        unique_selector: "main h1",
+        replayable: true,
+      });
+      const button_ref = this.register_element_ref(tab_id, {
+        selector: "button.primary-action",
+        unique_selector: "button.primary-action",
+        replayable: true,
+      });
+      const link_ref = this.register_element_ref(tab_id, {
+        selector: "a.primary-link",
+        unique_selector: "a.primary-link",
+        replayable: true,
+      });
 
       return {
         tab_id,
@@ -525,7 +547,11 @@ export class in_memory_bridge_transport implements bridge_transport {
       this.require_tab(tab_id, "browser_lookup");
       const text = typeof args.text === "string" ? args.text : "";
       const selector = "button.primary-action";
-      const element_ref = this.register_element_ref(tab_id, selector);
+      const element_ref = this.register_element_ref(tab_id, {
+        selector,
+        unique_selector: selector,
+        replayable: true,
+      });
       return {
         tab_id,
         matches: text.length
@@ -858,7 +884,6 @@ export class in_memory_bridge_transport implements bridge_transport {
           "content-type": "application/json",
         },
         request_post_data: "{\"query\":\"items\"}",
-        response_body: "{\"data\":{\"items\":[{\"id\":1,\"name\":\"Widget\"}]}}",
         mime_type: "application/json",
         timestamp: 1_710_000_000_250,
       };
@@ -874,6 +899,9 @@ export class in_memory_bridge_transport implements bridge_transport {
         return {
           tab_id,
           request,
+          response_body_text: "{\"data\":{\"items\":[{\"id\":1,\"name\":\"Widget\"}]}}",
+          body_available: true,
+          body_cached: false,
           json_path_result: args.jsonPath === "$.data.items[0].id" ? 1 : undefined,
         };
       }
@@ -1097,10 +1125,10 @@ export class in_memory_bridge_transport implements bridge_transport {
     return Math.max(...tab_ids) + 1;
   }
 
-  private get_element_ref_store(tab_id: number): Map<string, string> {
+  private get_element_ref_store(tab_id: number): Map<string, in_memory_element_ref_entry> {
     let store = this.element_refs_by_tab.get(tab_id);
     if (!store) {
-      store = new Map<string, string>();
+      store = new Map<string, in_memory_element_ref_entry>();
       this.element_refs_by_tab.set(tab_id, store);
     }
 
@@ -1108,15 +1136,24 @@ export class in_memory_bridge_transport implements bridge_transport {
   }
 
   private reset_element_refs_for_tab(tab_id: number): void {
-    this.element_refs_by_tab.set(tab_id, new Map<string, string>());
+    this.element_refs_by_tab.set(tab_id, new Map<string, in_memory_element_ref_entry>());
     this.element_ref_revision_by_tab.set(tab_id, (this.element_ref_revision_by_tab.get(tab_id) ?? 0) + 1);
   }
 
-  private register_element_ref(tab_id: number, selector: string): string {
+  private register_element_ref(tab_id: number, descriptor: string | in_memory_element_ref_entry): string {
     const store = this.get_element_ref_store(tab_id);
     const revision = this.element_ref_revision_by_tab.get(tab_id) ?? 0;
     const element_ref = `el_${tab_id}_${revision}_${store.size + 1}`;
-    store.set(element_ref, selector);
+    store.set(
+      element_ref,
+      typeof descriptor === "string"
+        ? {
+            selector: descriptor,
+            unique_selector: descriptor,
+            replayable: true,
+          }
+        : descriptor,
+    );
     return element_ref;
   }
 
@@ -1131,15 +1168,22 @@ export class in_memory_bridge_transport implements bridge_transport {
       return undefined;
     }
 
-    const resolved_selector = this.get_element_ref_store(tab_id).get(element_ref);
-    if (!resolved_selector) {
+    const resolved_entry = this.get_element_ref_store(tab_id).get(element_ref);
+    if (!resolved_entry) {
       throw new tool_error("STALE_ELEMENT_REFERENCE", `element_ref is stale: ${element_ref}`, false, {
         tab_id,
         element_ref,
       });
     }
 
-    return resolved_selector;
+    if (resolved_entry.replayable === false || typeof resolved_entry.unique_selector !== "string" || resolved_entry.unique_selector.length === 0) {
+      throw new tool_error("STALE_ELEMENT_REFERENCE", `element_ref is stale: ${element_ref}`, false, {
+        tab_id,
+        element_ref,
+      });
+    }
+
+    return resolved_entry.unique_selector;
   }
 
   private resolve_required_selector_from_args(tab_id: number, args: Record<string, unknown>, tool_name: string): string {
