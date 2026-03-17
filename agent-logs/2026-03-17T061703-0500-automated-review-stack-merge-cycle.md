@@ -22,7 +22,7 @@
 
 ### PR #1
 
-- Switched the `github` remote to HTTPS so `gt submit` could push without the missing SSH key path.
+- Switched the `GitHub` remote to HTTPS so `gt submit` could push without the missing SSH key path.
 - Addressed valid automated review findings in the bottom PR:
   - cleared leaked element ref revision state on detach/remove
   - validated `LOCAL_MCP_TEST_BRIDGE_PORT` parsing in tests

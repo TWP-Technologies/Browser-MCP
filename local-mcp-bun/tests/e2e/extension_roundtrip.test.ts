@@ -201,7 +201,7 @@ async function start_fixture_server(): Promise<Bun.Server> {
               items: [
                 {
                   id: 1,
-                  name: "Fixture Widget",
+                  name: "Fíxture Café",
                 },
               ],
             },
@@ -615,6 +615,8 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
     expect(Array.isArray(network_list.requests)).toBe(true);
     expect((network_list.requests ?? []).length).toBeGreaterThan(0);
+    expect(Object.hasOwn(network_list.requests?.[0] ?? {}, "response_body")).toBe(false);
+    expect(Object.hasOwn(network_list.requests?.[0] ?? {}, "response_body_base64")).toBe(false);
 
     const request_id = String(network_list.requests?.[0]?.request_id ?? "");
     expect(request_id.length).toBeGreaterThan(0);
@@ -622,9 +624,10 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     const network_details = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "details",
       requestId: request_id,
-      jsonPath: "$.data.items[0].id",
+      jsonPath: "$.data.items[0].name",
     });
-    expect(network_details.json_path_result).toBe(1);
+    expect(network_details.json_path_result).toBe("Fíxture Café");
+    expect(String(network_details.response_body_text ?? "")).toContain("Fíxture Café");
 
     const replay_result = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "replay",
