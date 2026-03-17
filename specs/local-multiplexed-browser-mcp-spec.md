@@ -19,6 +19,8 @@
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
 - Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
 - Behavioral Blueprint parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, `element_ref` chaining, and optional local artifact persistence.
+- `element_ref` reuse is fail-closed: if follow-up resolution cannot prove it still targets the original node, the runtime MUST return `STALE_ELEMENT_REFERENCE` instead of replaying against a first-match selector.
+- `browser_network_requests action=list` MUST remain metadata-only; response bodies SHOULD be fetched lazily by `action=details` and MAY be cached only within bounded in-memory limits.
 - Crash/restart recovery for client exits and extension restarts.
 - Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.
 - Co-located repository layout for Bun server and custom extension in a single implementation tree.
@@ -60,7 +62,8 @@
 - `tab_lock`: `tab_id` (REQUIRED, integer > 0, unique), `owner_agent_session_id` (REQUIRED, string), `lock_state` (REQUIRED, enum: `pending_attach|attached|releasing`), `lease_expires_at` (OPTIONAL, RFC3339 timestamp), `wait_queue` (REQUIRED, array<lock_wait_request>, default `[]`).
 - `lock_wait_request`: `agent_session_id` (REQUIRED, string), `requested_at` (REQUIRED, RFC3339 timestamp), `timeout_ms` (REQUIRED, integer, min 1, max 120000), `request_id` (REQUIRED, UUID string).
 - `tool_request_envelope`: `request_id` (REQUIRED, UUID string), `agent_session_id` (REQUIRED, string), `tool_name` (REQUIRED, enum), `payload` (REQUIRED, object), `received_at` (REQUIRED, RFC3339 timestamp).
-- `tool_error`: `code` (REQUIRED, enum: `LOCK_CONFLICT|TAB_NOT_FOUND|INVALID_ARGUMENT|EXTENSION_UNAVAILABLE|ATTACH_FAILED|DETACH_FAILED|SESSION_NOT_FOUND|UNAUTHORIZED|TIMEOUT`), `message` (REQUIRED, string), `retryable` (REQUIRED, boolean), `details` (OPTIONAL, object), `correlation_id` (REQUIRED, UUID string).
+- `tool_error`: `code` (REQUIRED, enum: `LOCK_CONFLICT|LOCK_NOT_OWNED|TAB_NOT_FOUND|INVALID_ARGUMENT|STALE_ELEMENT_REFERENCE|EXTENSION_UNAVAILABLE|TOOL_FAILED|ATTACH_FAILED|DETACH_FAILED|SESSION_NOT_FOUND|UNAUTHORIZED|TIMEOUT`), `message` (REQUIRED, string), `retryable` (REQUIRED, boolean), `details` (OPTIONAL, object), `correlation_id` (REQUIRED, UUID string).
+- Element-targeting tools that accept `element_ref` MUST fail with `STALE_ELEMENT_REFERENCE` when the original node cannot be re-identified confidently after navigation or DOM mutation.
 - `living_spec_state`: `spec_version` (REQUIRED, semver string), `status` (REQUIRED, enum: `draft|active|superseded`), `last_updated_at` (REQUIRED, RFC3339 timestamp), `completed_requirement_ids` (REQUIRED, array<string>, default `[]`), `completion_notes_file` (OPTIONAL, path string).
 
 ## 4.0 Essential Error Handling (Required)

@@ -18,6 +18,10 @@
 - Tightened Bun-router artifact persistence so screenshot/PDF `path` writes are normalized to workspace-local destinations, reject lexical escapes, and reject symlink-targeted writes outside the workspace boundary.
 - Tightened the advertised `browser_evaluate` router schema so callers must provide `expression` or `function` instead of relying on runtime-only validation.
 - Converted the browser roundtrip E2E fixture from a `data:` page to a loopback HTTP fixture so extension attach, executeScript, and network-capture paths are verified against a host-accessible page.
+- Tightened `element_ref` replay so ambiguous follow-up resolution fails closed with `STALE_ELEMENT_REFERENCE` instead of replaying against a first-match selector.
+- Changed `browser_network_requests` to capture metadata eagerly but fetch response bodies lazily on `action=details`, with bounded in-memory caching for retained text-like bodies.
+- Unified visual-visibility checks across wait, verify, overlay, snapshot, and lookup paths in the extension runtime.
+- Replaced fixed fixture-port probe ranges in the E2E suites with a shared loopback-port allocator that avoids bridge-port collisions.
 - Updated the Blueprint parity audit and living spec to mark overlapping tools as behaviorally at parity for local scope.
 
 ### Verification
