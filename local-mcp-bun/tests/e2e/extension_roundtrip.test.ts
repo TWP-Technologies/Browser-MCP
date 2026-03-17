@@ -8,6 +8,7 @@ import { chromium, type Browser, type BrowserContext, type LaunchPersistentConte
 import { websocket_bridge_transport } from "../../src/bridge_transport";
 import { tool_error } from "../../src/errors";
 import { local_mcp_runtime } from "../../src/runtime";
+import { create_workspace_output_dir } from "../helpers/artifact_output";
 
 const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
@@ -31,6 +32,7 @@ const fixture_url_prefix = "http://127.0.0.1:";
 let extension_id = "";
 let fixture_server: Bun.Server | undefined;
 const user_data_dirs: string[] = [];
+
 const fixture_html = `
 <!doctype html>
 <html lang="en">
@@ -545,7 +547,7 @@ afterAll(async () => {
 
 test("extension bridge supports semantic observation, observability, and pdf export", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e");
-  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-pdf-"));
+  const output_dir = create_workspace_output_dir("local-mcp-roundtrip-pdf-");
   const pdf_output_path = join(output_dir, "fixture.pdf");
 
   try {
@@ -667,7 +669,7 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
 test("extension bridge supports screenshot viewport, full-page, selector, and selector errors", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e-screenshot");
-  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-shot-"));
+  const output_dir = create_workspace_output_dir("local-mcp-roundtrip-shot-");
   const screenshot_output_path = join(output_dir, "fixture.png");
 
   try {

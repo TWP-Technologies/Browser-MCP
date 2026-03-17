@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool_error, to_tool_error } from "./errors";
 import { merge_tabs_with_locks, type bridge_transport } from "./bridge_transport";
 import { session_registry } from "./session_registry";
@@ -51,6 +51,26 @@ const passthrough_tools = [
 ] as const;
 
 const system_agent_session_id = "system-router";
+const artifact_root = resolve(process.cwd());
+const artifact_root_real = realpathSync(artifact_root);
+
+function is_within_root(root_path: string, candidate_path: string): boolean {
+  const relative_path = relative(root_path, candidate_path);
+  return relative_path === "" || (!relative_path.startsWith("..") && !isAbsolute(relative_path));
+}
+
+function resolve_artifact_path(requested_path: string): string {
+  const candidate_path = isAbsolute(requested_path) ? resolve(requested_path) : resolve(artifact_root, requested_path);
+
+  if (!is_within_root(artifact_root, candidate_path)) {
+    throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
+      path: requested_path,
+      artifact_root,
+    });
+  }
+
+  return candidate_path;
+}
 
 export class tool_router {
   private readonly session_registry: session_registry;
@@ -357,6 +377,7 @@ export class tool_router {
             "Forwarded browser tool: browser_evaluate. Executes a JavaScript expression or function in the attached tab and returns structured results.",
           inputSchema: {
             type: "object",
+            anyOf: [{ required: ["expression"] }, { required: ["function"] }],
             properties: {
               expression: { type: "string" },
               function: { type: "string" },
@@ -1267,11 +1288,26 @@ export class tool_router {
       return result;
     }
 
-    const absolute_path = resolve(requested_path);
+    const absolute_path = resolve_artifact_path(requested_path);
     const bytes = Buffer.from(data_base64, "base64");
 
     try {
       mkdirSync(dirname(absolute_path), { recursive: true });
+      const parent_real = realpathSync(dirname(absolute_path));
+      if (!is_within_root(artifact_root_real, parent_real)) {
+        throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
+          path: requested_path,
+          artifact_root,
+        });
+      }
+
+      if (existsSync(absolute_path) && lstatSync(absolute_path).isSymbolicLink()) {
+        throw new tool_error("INVALID_ARGUMENT", "artifact path cannot target a symbolic link", false, {
+          path: requested_path,
+          artifact_root,
+        });
+      }
+
       await Bun.write(absolute_path, bytes);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

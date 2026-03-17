@@ -28,6 +28,29 @@ test("tool_router lists tabs and lock metadata", async () => {
   await runtime.stop();
 });
 
+test("tool_router advertises browser_evaluate input requirements", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const evaluate_tool = runtime.tool_router
+    .list_tools()
+    .find((tool) => tool.name === "browser_evaluate") as
+    | {
+        inputSchema?: {
+          anyOf?: Array<{ required?: string[] }>;
+        };
+      }
+    | undefined;
+
+  expect(evaluate_tool).toBeDefined();
+  expect(evaluate_tool?.inputSchema?.anyOf).toEqual([{ required: ["expression"] }, { required: ["function"] }]);
+
+  await runtime.stop();
+});
+
 test("attach_to_tab enforces lock conflict and detach handoff", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",

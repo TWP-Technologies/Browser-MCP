@@ -15,6 +15,8 @@
   - network replay plus on-demand response-body inspection and JSONPath-style lookup,
   - richer console filters, extension list/reload reporting, and structured performance metrics.
 - Added Bun-router artifact persistence for screenshots and PDFs so `path` writes occur locally in the MCP runtime rather than the extension.
+- Tightened Bun-router artifact persistence so screenshot/PDF `path` writes are normalized to workspace-local destinations, reject lexical escapes, and reject symlink-targeted writes outside the workspace boundary.
+- Tightened the advertised `browser_evaluate` router schema so callers must provide `expression` or `function` instead of relying on runtime-only validation.
 - Converted the browser roundtrip E2E fixture from a `data:` page to a loopback HTTP fixture so extension attach, executeScript, and network-capture paths are verified against a host-accessible page.
 - Updated the Blueprint parity audit and living spec to mark overlapping tools as behaviorally at parity for local scope.
 

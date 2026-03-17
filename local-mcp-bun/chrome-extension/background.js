@@ -116,6 +116,19 @@ function clear_element_refs_for_tab(tab_id) {
   element_ref_revision_by_tab.delete(tab_id);
 }
 
+const forbidden_replay_header_names = new Set([
+  "accept-encoding",
+  "connection",
+  "content-length",
+  "cookie",
+  "cookie2",
+  "host",
+  "origin",
+  "referer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
 function register_element_ref(tab_id, descriptor) {
   const store = get_element_ref_store(tab_id);
   const revision = get_element_ref_revision(tab_id);
@@ -138,6 +151,39 @@ function resolve_element_ref_entry(tab_id, element_ref) {
   }
 
   return entry;
+}
+
+function sanitize_replay_headers(raw_headers) {
+  const sanitized_headers = Object.create(null);
+  if (!raw_headers || typeof raw_headers !== "object") {
+    return sanitized_headers;
+  }
+
+  for (const [name, value] of Object.entries(raw_headers)) {
+    if (typeof name !== "string" || name.length === 0) {
+      continue;
+    }
+
+    const normalized_name = name.toLowerCase();
+    if (
+      forbidden_replay_header_names.has(normalized_name) ||
+      normalized_name.startsWith("proxy-") ||
+      normalized_name.startsWith("sec-")
+    ) {
+      continue;
+    }
+
+    if (typeof value === "string") {
+      sanitized_headers[name] = value;
+      continue;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      sanitized_headers[name] = String(value);
+    }
+  }
+
+  return sanitized_headers;
 }
 
 function now() {
@@ -1861,12 +1907,13 @@ async function execute_browser_snapshot(tab_id) {
     function is_visible(element) {
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
+      const opacity = Number(style.opacity);
       return (
         rect.width > 0 &&
         rect.height > 0 &&
         style.visibility !== "hidden" &&
         style.display !== "none" &&
-        style.opacity !== "0"
+        (Number.isNaN(opacity) || opacity > 0)
       );
     }
 
@@ -2815,7 +2862,14 @@ async function execute_browser_lookup(args, tab_id) {
     function is_visible(element) {
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      const opacity = Number(style.opacity);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        (Number.isNaN(opacity) || opacity > 0)
+      );
     }
 
     for (const element of Array.from(document.querySelectorAll("body *"))) {
@@ -3275,17 +3329,32 @@ async function execute_browser_network_requests(args, tab_id) {
       throw new Error(`request not found: ${request_id}`);
     }
 
-    const headers = { ...(request.request_headers || {}) };
-    delete headers.host;
-    delete headers["content-length"];
-    delete headers["Content-Length"];
+    const method = typeof request.method === "string" && request.method.length > 0 ? request.method.toUpperCase() : "GET";
+    const headers = sanitize_replay_headers(request.request_headers);
+    const body =
+      method === "GET" || method === "HEAD"
+        ? undefined
+        : typeof request.request_post_data === "string"
+          ? request.request_post_data
+          : undefined;
 
-    const response = await fetch(request.url, {
-      method: request.method || "GET",
-      headers,
-      body: typeof request.request_post_data === "string" ? request.request_post_data : undefined,
-    });
-    const response_body_excerpt = await response.text();
+    let response;
+    let response_body_excerpt = "";
+    try {
+      response = await fetch(request.url, {
+        method,
+        headers,
+        body,
+      });
+      response_body_excerpt = await response.text();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw create_extension_error("TOOL_FAILED", `browser_network_requests replay failed: ${message}`, {
+        tab_id: resolved_tab_id,
+        request_id,
+        url: request.url,
+      });
+    }
 
     return {
       tab_id: resolved_tab_id,
