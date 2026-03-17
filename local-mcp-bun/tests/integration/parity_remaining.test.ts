@@ -1,19 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
+import { join, sep } from "node:path";
 import { tool_error } from "../../src/errors";
 import { in_memory_bridge_transport } from "../../src/bridge_transport";
 import { local_mcp_runtime } from "../../src/runtime";
+import { create_workspace_output_dir } from "../helpers/artifact_output";
 
 function parse_test_bridge_port(): number {
   const parsed_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
   return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
-}
-
-function create_workspace_output_dir(prefix: string): string {
-  const artifact_root = resolve(process.cwd(), ".tmp-artifacts");
-  mkdirSync(artifact_root, { recursive: true });
-  return mkdtempSync(join(artifact_root, prefix));
 }
 
 const test_bridge_port = parse_test_bridge_port();
@@ -178,6 +173,25 @@ test("artifact persistence rejects paths outside the workspace", async () => {
       path: "../outside-workspace.png",
     });
     throw new Error("expected artifact path validation to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("artifact path must stay within the current workspace");
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("artifact persistence rejects absolute paths with traversal segments", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "artifact-scope-absolute");
+  const escaped_path = `${process.cwd()}${sep}nested${sep}..${sep}..${sep}outside-workspace.png`;
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_pdf_save", {
+      path: escaped_path,
+    });
+    throw new Error("expected artifact path normalization to fail");
   } catch (error) {
     expect(error).toBeInstanceOf(tool_error);
     expect((error as tool_error).code).toBe("INVALID_ARGUMENT");

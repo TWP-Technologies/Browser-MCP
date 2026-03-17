@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import { chromium, type Browser, type BrowserContext, type LaunchPersistentConte
 import { websocket_bridge_transport } from "../../src/bridge_transport";
 import { tool_error } from "../../src/errors";
 import { local_mcp_runtime } from "../../src/runtime";
+import { create_workspace_output_dir } from "../helpers/artifact_output";
 
 const current_dir = dirname(fileURLToPath(import.meta.url));
 const extension_path = resolve(current_dir, "../../chrome-extension");
@@ -31,12 +32,6 @@ const fixture_url_prefix = "http://127.0.0.1:";
 let extension_id = "";
 let fixture_server: Bun.Server | undefined;
 const user_data_dirs: string[] = [];
-
-function create_workspace_output_dir(prefix: string): string {
-  const artifact_root = resolve(process.cwd(), ".tmp-artifacts");
-  mkdirSync(artifact_root, { recursive: true });
-  return mkdtempSync(join(artifact_root, prefix));
-}
 
 const fixture_html = `
 <!doctype html>

@@ -154,7 +154,7 @@ function resolve_element_ref_entry(tab_id, element_ref) {
 }
 
 function sanitize_replay_headers(raw_headers) {
-  const sanitized_headers = {};
+  const sanitized_headers = Object.create(null);
   if (!raw_headers || typeof raw_headers !== "object") {
     return sanitized_headers;
   }

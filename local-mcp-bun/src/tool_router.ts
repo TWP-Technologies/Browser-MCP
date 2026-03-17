@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { mkdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool_error, to_tool_error } from "./errors";
 import { merge_tabs_with_locks, type bridge_transport } from "./bridge_transport";
@@ -52,14 +52,17 @@ const passthrough_tools = [
 
 const system_agent_session_id = "system-router";
 const artifact_root = resolve(process.cwd());
+const artifact_root_real = realpathSync(artifact_root);
+
+function is_within_root(root_path: string, candidate_path: string): boolean {
+  const relative_path = relative(root_path, candidate_path);
+  return relative_path === "" || (!relative_path.startsWith("..") && !isAbsolute(relative_path));
+}
 
 function resolve_artifact_path(requested_path: string): string {
-  const candidate_path = isAbsolute(requested_path) ? requested_path : resolve(artifact_root, requested_path);
-  const relative_path = relative(artifact_root, candidate_path);
-  const is_within_artifact_root =
-    relative_path === "" || (!relative_path.startsWith("..") && !isAbsolute(relative_path));
+  const candidate_path = isAbsolute(requested_path) ? resolve(requested_path) : resolve(artifact_root, requested_path);
 
-  if (!is_within_artifact_root) {
+  if (!is_within_root(artifact_root, candidate_path)) {
     throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
       path: requested_path,
       artifact_root,
@@ -1290,6 +1293,21 @@ export class tool_router {
 
     try {
       mkdirSync(dirname(absolute_path), { recursive: true });
+      const parent_real = realpathSync(dirname(absolute_path));
+      if (!is_within_root(artifact_root_real, parent_real)) {
+        throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
+          path: requested_path,
+          artifact_root,
+        });
+      }
+
+      if (existsSync(absolute_path) && lstatSync(absolute_path).isSymbolicLink()) {
+        throw new tool_error("INVALID_ARGUMENT", "artifact path cannot target a symbolic link", false, {
+          path: requested_path,
+          artifact_root,
+        });
+      }
+
       await Bun.write(absolute_path, bytes);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
