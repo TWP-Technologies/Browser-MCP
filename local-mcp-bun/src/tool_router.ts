@@ -177,6 +177,7 @@ export class tool_router {
             "Forwarded browser tool: browser_interact. Executes a single action or ordered actions[] against selector or element_ref targets.",
           inputSchema: {
             type: "object",
+            anyOf: [{ required: ["action"] }, { required: ["actions"] }],
             properties: {
               action: { type: "string" },
               selector: { type: "string" },
@@ -191,6 +192,7 @@ export class tool_router {
               },
               actions: {
                 type: "array",
+                minItems: 1,
                 items: {
                   type: "object",
                 },

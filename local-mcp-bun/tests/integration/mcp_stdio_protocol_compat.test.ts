@@ -22,7 +22,12 @@ interface running_server {
 }
 
 const running_servers: running_server[] = [];
-const test_bridge_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+function parse_test_bridge_port(): number {
+  const parsed_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+  return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
+}
+
+const test_bridge_port = parse_test_bridge_port();
 const project_root = resolve(import.meta.dir, "../..");
 const package_version = (
   JSON.parse(readFileSync(resolve(project_root, "package.json"), "utf8")) as { version?: string }

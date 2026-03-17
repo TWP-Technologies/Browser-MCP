@@ -3,7 +3,12 @@ import { local_mcp_runtime } from "../../src/runtime";
 import { in_memory_bridge_transport } from "../../src/bridge_transport";
 import { tool_error } from "../../src/errors";
 
-const test_bridge_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+function parse_test_bridge_port(): number {
+  const parsed_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+  return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
+}
+
+const test_bridge_port = parse_test_bridge_port();
 
 test("tool_router lists tabs and lock metadata", async () => {
   const runtime = new local_mcp_runtime({

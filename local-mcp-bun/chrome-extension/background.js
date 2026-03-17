@@ -108,6 +108,11 @@ function reset_element_refs_for_tab(tab_id) {
   element_ref_revision_by_tab.set(tab_id, get_element_ref_revision(tab_id) + 1);
 }
 
+function clear_element_refs_for_tab(tab_id) {
+  element_refs_by_tab.delete(tab_id);
+  element_ref_revision_by_tab.delete(tab_id);
+}
+
 function register_element_ref(tab_id, descriptor) {
   const store = get_element_ref_store(tab_id);
   const revision = get_element_ref_revision(tab_id);
@@ -893,7 +898,11 @@ function register_ui_message_listener() {
 }
 
 function register_runtime_listeners() {
-  chrome.tabs.onUpdated.addListener((_tab_id, change_info) => {
+  chrome.tabs.onUpdated.addListener((tab_id, change_info) => {
+    if (typeof tab_id === "number" && attached_tab_ids.has(tab_id) && (change_info.status === "loading" || typeof change_info.url === "string")) {
+      reset_element_refs_for_tab(tab_id);
+    }
+
     if (!change_info.url && !change_info.status) {
       return;
     }
@@ -907,6 +916,7 @@ function register_runtime_listeners() {
     attached_tab_ids.delete(tab_id);
     network_requests_by_tab.delete(tab_id);
     console_messages_by_tab.delete(tab_id);
+    clear_element_refs_for_tab(tab_id);
 
     send_json({
       type: "detach_notice",
@@ -923,15 +933,16 @@ function register_runtime_listeners() {
 function register_debugger_detach_listener() {
   chrome.debugger.onDetach.addListener((source, reason) => {
     const tab_id = source.tabId;
-    if (typeof tab_id !== "number") {
-      return;
-    }
+  if (typeof tab_id !== "number") {
+    return;
+  }
 
-    attached_tab_ids.delete(tab_id);
-    network_requests_by_tab.delete(tab_id);
+  attached_tab_ids.delete(tab_id);
+  network_requests_by_tab.delete(tab_id);
+  clear_element_refs_for_tab(tab_id);
 
-    send_json({
-      type: "detach_notice",
+  send_json({
+    type: "detach_notice",
       tab_id,
       reason,
     });
@@ -1355,9 +1366,15 @@ async function wait_for_selector(tab_id, selector, timeout_ms) {
 async function force_pseudo_state(tab_id, selector, pseudo_state) {
   const node_id = await resolve_dom_node_id(tab_id, selector);
   await send_debugger_command(tab_id, "CSS.enable", {});
+  const forced_pseudo_classes =
+    Array.isArray(pseudo_state)
+      ? pseudo_state.filter((entry) => typeof entry === "string" && entry.length > 0)
+      : typeof pseudo_state === "string" && pseudo_state.length > 0
+        ? [pseudo_state]
+        : [];
   await send_debugger_command(tab_id, "CSS.forcePseudoState", {
     nodeId: node_id,
-    forcedPseudoClasses: [pseudo_state],
+    forcedPseudoClasses: forced_pseudo_classes,
   });
 }
 
@@ -1366,6 +1383,15 @@ async function execute_browser_snapshot(tab_id) {
   reset_element_refs_for_tab(resolved_tab_id);
 
   const page_snapshot = await execute_in_tab(resolved_tab_id, () => {
+    function escape_css_identifier(value) {
+      const raw_value = String(value);
+      if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
+        return globalThis.CSS.escape(raw_value);
+      }
+
+      return raw_value.replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+    }
+
     function infer_role(element) {
       const explicit_role = element.getAttribute("role");
       if (explicit_role) {
@@ -1474,17 +1500,17 @@ async function execute_browser_snapshot(tab_id) {
 
     function selector_for(element) {
       if (element.id) {
-        return `#${element.id}`;
+        return `#${escape_css_identifier(element.id)}`;
       }
 
       const data_test_id = element.getAttribute("data-testid");
       if (data_test_id) {
-        return `[data-testid="${String(data_test_id).replace(/"/gu, '\\"')}"]`;
+        return `[data-testid="${escape_css_identifier(data_test_id)}"]`;
       }
 
       const name = element.getAttribute("name");
       if (name) {
-        return `${element.tagName.toLowerCase()}[name="${String(name).replace(/"/gu, '\\"')}"]`;
+        return `${element.tagName.toLowerCase()}[name="${escape_css_identifier(name)}"]`;
       }
 
       const segments = [];
@@ -1507,10 +1533,14 @@ async function execute_browser_snapshot(tab_id) {
     }
 
     const candidates = new Set([document.body]);
-    for (const element of Array.from(
-      document.querySelectorAll("a[href],button,input,select,textarea,summary,[role],[tabindex],label,h1,h2,h3,h4,h5,h6,main,nav,article,section,form"),
+    const max_candidates = 240;
+    for (const element of document.querySelectorAll(
+      "a[href],button,input,select,textarea,summary,[role],[tabindex],label,h1,h2,h3,h4,h5,h6,main,nav,article,section,form",
     )) {
       candidates.add(element);
+      if (candidates.size >= max_candidates) {
+        break;
+      }
     }
 
     const nodes = Array.from(candidates)
@@ -2032,7 +2062,7 @@ async function execute_browser_fill_form(args, tab_id) {
     const resolved_target = await resolve_selector_target(field, resolved_tab_id);
     fields.push({
       ...field,
-      selector: resolved_target.selector,
+      selector: resolved_target.selector || undefined,
       element_ref: resolved_target.element_ref,
     });
   }
@@ -2140,18 +2170,48 @@ async function execute_browser_lookup(args, tab_id) {
 
     function selector_for(element) {
       if (element.id) {
-        return `#${element.id}`;
-      }
-
-      let selector = element.tagName.toLowerCase();
-      if (element.className && typeof element.className === "string") {
-        const first_class = element.className.split(" ").filter(Boolean)[0];
-        if (first_class) {
-          selector += `.${first_class}`;
+        if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
+          return `#${globalThis.CSS.escape(element.id)}`;
         }
+
+        return `#${String(element.id).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `)}`;
       }
 
-      return selector;
+      const data_test_id = element.getAttribute("data-testid");
+      if (data_test_id) {
+        const escaped_data_test_id =
+          globalThis.CSS && typeof globalThis.CSS.escape === "function"
+            ? globalThis.CSS.escape(data_test_id)
+            : String(data_test_id).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+        return `[data-testid="${escaped_data_test_id}"]`;
+      }
+
+      const name = element.getAttribute("name");
+      if (name) {
+        const escaped_name =
+          globalThis.CSS && typeof globalThis.CSS.escape === "function"
+            ? globalThis.CSS.escape(name)
+            : String(name).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+        return `${element.tagName.toLowerCase()}[name="${escaped_name}"]`;
+      }
+
+      const segments = [];
+      let current = element;
+      while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+        let segment = current.tagName.toLowerCase();
+        const parent = current.parentElement;
+        if (parent) {
+          const same_tag_siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current.tagName);
+          if (same_tag_siblings.length > 1) {
+            segment += `:nth-of-type(${same_tag_siblings.indexOf(current) + 1})`;
+          }
+        }
+
+        segments.unshift(segment);
+        current = current.parentElement;
+      }
+
+      return ["body", ...segments].join(" > ");
     }
 
     function infer_role(element) {
@@ -2262,7 +2322,7 @@ async function execute_browser_extract_content(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   const mode = typeof args?.mode === "string" ? args.mode : "auto";
   const resolved_target = await resolve_selector_target(args, resolved_tab_id);
-  const selector = resolved_target.selector || (typeof args?.selector === "string" ? args.selector : "body");
+  const selector = resolved_target.selector || (typeof args?.selector === "string" ? args.selector.trim() : "") || "body";
   const max_lines = typeof args?.max_lines === "number" ? Math.max(1, args.max_lines) : 500;
   const offset = typeof args?.offset === "number" ? Math.max(0, args.offset) : 0;
 
@@ -2309,34 +2369,41 @@ async function execute_browser_get_element_styles(args, tab_id) {
     await force_pseudo_state(resolved_tab_id, selector, pseudo_state);
   }
 
-  const styles = await execute_in_tab(resolved_tab_id, (incoming_selector, incoming_property) => {
-    const element = document.querySelector(incoming_selector);
-    if (!element) {
-      return { found: false };
-    }
+  let styles;
+  try {
+    styles = await execute_in_tab(resolved_tab_id, (incoming_selector, incoming_property) => {
+      const element = document.querySelector(incoming_selector);
+      if (!element) {
+        return { found: false };
+      }
 
-    const computed = getComputedStyle(element);
-    if (incoming_property) {
+      const computed = getComputedStyle(element);
+      if (incoming_property) {
+        return {
+          found: true,
+          selector: incoming_selector,
+          property: incoming_property,
+          value: computed.getPropertyValue(incoming_property),
+        };
+      }
+
+      const keys = ["display", "visibility", "position", "color", "background-color", "font-size"];
+      const picked = {};
+      for (const key of keys) {
+        picked[key] = computed.getPropertyValue(key);
+      }
+
       return {
         found: true,
         selector: incoming_selector,
-        property: incoming_property,
-        value: computed.getPropertyValue(incoming_property),
+        styles: picked,
       };
+    }, selector, property);
+  } finally {
+    if (pseudo_state) {
+      await force_pseudo_state(resolved_tab_id, selector, []);
     }
-
-    const keys = ["display", "visibility", "position", "color", "background-color", "font-size"];
-    const picked = {};
-    for (const key of keys) {
-      picked[key] = computed.getPropertyValue(key);
-    }
-
-    return {
-      found: true,
-      selector: incoming_selector,
-      styles: picked,
-    };
-  }, selector, property);
+  }
 
   return {
     tab_id: resolved_tab_id,
@@ -2651,7 +2718,7 @@ async function detach_from_tab(tab_id) {
       attached_tab_ids.delete(resolved_tab_id);
       network_requests_by_tab.delete(resolved_tab_id);
       console_messages_by_tab.delete(resolved_tab_id);
-      element_refs_by_tab.delete(resolved_tab_id);
+      clear_element_refs_for_tab(resolved_tab_id);
       resolve(undefined);
     });
   });

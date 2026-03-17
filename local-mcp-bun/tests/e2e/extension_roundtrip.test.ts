@@ -15,15 +15,21 @@ const is_windows = process.platform === "win32";
 const force_cdp_launch = process.env.E2E_FORCE_CDP_LAUNCH === "1";
 const windows_try_persistent_context = process.env.E2E_WINDOWS_TRY_PERSISTENT_CONTEXT === "1";
 const reconnect_wait_timeout_ms = Number.parseInt(process.env.E2E_RECONNECT_WAIT_TIMEOUT_MS ?? "30000", 10);
-const test_bridge_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+function parse_test_bridge_port(): number {
+  const parsed_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+  return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
+}
+
+const test_bridge_port = parse_test_bridge_port();
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
 let browser: Browser | undefined;
 let browser_process: ChildProcess | undefined;
 let fixture_url = "";
-const fixture_url_prefix = "data:text/html;charset=utf-8,";
+const fixture_url_prefix = "http://127.0.0.1:";
 let extension_id = "";
+let fixture_server: Bun.Server | undefined;
 const user_data_dirs: string[] = [];
 const fixture_html = `
 <!doctype html>
@@ -164,6 +170,36 @@ function find_fixture_tab(tabs: Array<Record<string, unknown>>): Record<string, 
   return tabs.find(
     (tab) => String(tab.url).startsWith(fixture_url_prefix) || String(tab.title).includes("Example Domain"),
   );
+}
+
+function start_fixture_server(): Bun.Server {
+  for (let port = 37940; port <= 37980; port += 1) {
+    try {
+      return Bun.serve({
+        port,
+        hostname: "127.0.0.1",
+        fetch(request) {
+          const url = new URL(request.url);
+          if (url.pathname === "/fixture") {
+            return new Response(fixture_html, {
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+              },
+            });
+          }
+
+          return new Response("not found", { status: 404 });
+        },
+      });
+    } catch (error) {
+      const message = stringify_error(error);
+      if (!message.includes("EADDRINUSE")) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("failed to allocate e2e fixture server port");
 }
 
 function parse_png_dimensions(data_base64: string): { width: number; height: number } {
@@ -392,7 +428,8 @@ async function launch_extension_context(): Promise<BrowserContext | undefined> {
 }
 
 beforeAll(async () => {
-  fixture_url = `${fixture_url_prefix}${encodeURIComponent(fixture_html)}`;
+  fixture_server = start_fixture_server();
+  fixture_url = `${fixture_url_prefix}${fixture_server.port}/fixture`;
 
   runtime = new local_mcp_runtime({
     bridge_mode: "websocket",
@@ -444,6 +481,8 @@ afterAll(async () => {
   } finally {
     context = undefined;
     await terminate_spawned_browser_process();
+    fixture_server?.stop(true);
+    fixture_server = undefined;
     if (runtime) {
       await runtime.stop();
     }

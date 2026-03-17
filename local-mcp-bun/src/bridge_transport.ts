@@ -1012,7 +1012,12 @@ export class websocket_bridge_transport implements bridge_transport {
     }
 
     if (!response.ok) {
-      const fallback_error_code = pending.action === "detach_from_tab" ? "DETACH_FAILED" : "ATTACH_FAILED";
+      const fallback_error_code =
+        pending.action === "detach_from_tab"
+          ? "DETACH_FAILED"
+          : pending.action === "call_tool"
+            ? "TOOL_FAILED"
+            : "ATTACH_FAILED";
       pending.reject(
         new tool_error(
           typeof response.error_code === "string" ? response.error_code : fallback_error_code,
