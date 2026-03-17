@@ -233,7 +233,8 @@ export class in_memory_bridge_transport implements bridge_transport {
           tabs: [...this.tabs_by_id.values()].map((tab, index) => ({
             ...tab,
             index,
-            active: false,
+            active: tab.active === true,
+            stealth: tab.stealth === true,
           })),
         };
       }
@@ -242,17 +243,66 @@ export class in_memory_bridge_transport implements bridge_transport {
         const next_tab_id = this.next_tab_id();
         const url = typeof args.url === "string" ? args.url : "about:blank";
         const title = url;
+        const activate = args.activate !== false;
+        const stealth = args.stealth === true;
+        for (const tab of this.tabs_by_id.values()) {
+          tab.active = false;
+        }
         this.tabs_by_id.set(next_tab_id, {
           tab_id: next_tab_id,
           url,
           title,
           debugger_attached: false,
+          active: activate,
+          stealth,
         });
 
         return {
           tab_id: next_tab_id,
           url,
           title,
+          active: activate,
+          stealth,
+        };
+      }
+
+      if (action === "activate") {
+        const explicit_tab_id = args.tab_id;
+        if (typeof explicit_tab_id !== "number") {
+          throw new tool_error("INVALID_ARGUMENT", "browser_tabs activate requires tab_id", false, { args });
+        }
+
+        const tab = this.tabs_by_id.get(explicit_tab_id);
+        if (!tab) {
+          throw new tool_error("TAB_NOT_FOUND", `tab ${explicit_tab_id} not found`, false, { tab_id: explicit_tab_id });
+        }
+
+        for (const entry of this.tabs_by_id.values()) {
+          entry.active = false;
+        }
+        tab.active = true;
+
+        return {
+          tab_id: explicit_tab_id,
+          active: true,
+        };
+      }
+
+      if (action === "set_stealth") {
+        const explicit_tab_id = args.tab_id;
+        if (typeof explicit_tab_id !== "number") {
+          throw new tool_error("INVALID_ARGUMENT", "browser_tabs set_stealth requires tab_id", false, { args });
+        }
+
+        const tab = this.tabs_by_id.get(explicit_tab_id);
+        if (!tab) {
+          throw new tool_error("TAB_NOT_FOUND", `tab ${explicit_tab_id} not found`, false, { tab_id: explicit_tab_id });
+        }
+
+        tab.stealth = args.stealth === true;
+        return {
+          tab_id: explicit_tab_id,
+          stealth: tab.stealth,
         };
       }
 
@@ -269,7 +319,7 @@ export class in_memory_bridge_transport implements bridge_transport {
           this.tabs_by_id.delete(resolved_tab_id);
         }
 
-        return { success: true };
+        return { success: true, closed: true, tab_id: resolved_tab_id };
       }
     }
 
@@ -292,6 +342,9 @@ export class in_memory_bridge_transport implements bridge_transport {
 
         tab.url = url;
         tab.title = url;
+      } else if (action === "test_page") {
+        tab.url = "data:text/html,<html><body><h1>Local MCP Bun Test Page</h1></body></html>";
+        tab.title = "Local MCP Bun Test Page";
       }
 
       this.reset_element_refs_for_tab(tab_id);
@@ -300,6 +353,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         tab_id,
         url: tab.url,
         title: tab.title,
+        action,
       };
     }
 
@@ -361,14 +415,21 @@ export class in_memory_bridge_transport implements bridge_transport {
       const text = typeof args.text === "string" ? args.text : "";
       return {
         tab_id,
+        text,
         visible: text.length > 0,
       };
     }
 
     if (tool_name === "browser_verify_element_visible") {
-      const selector = typeof args.selector === "string" ? args.selector : "";
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_verify_element_visible", false);
+      }
+
+      const selector = this.resolve_required_selector_from_args(tab_id, args, "browser_verify_element_visible");
       return {
         tab_id,
+        selector,
+        element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
         visible: selector.length > 0,
       };
     }
@@ -414,11 +475,31 @@ export class in_memory_bridge_transport implements bridge_transport {
 
       this.require_tab(tab_id, "browser_interact");
       const actions = this.normalize_interact_actions(args);
+      const on_error = args.onError === "ignore" ? "ignore" : "stop";
       const results: Array<Record<string, unknown>> = [];
 
-      for (const action of actions) {
+      for (let index = 0; index < actions.length; index += 1) {
+        const action = actions[index];
         const type = typeof action.type === "string" ? action.type : "unknown";
-        const selector = this.resolve_selector_from_args_optional(tab_id, action);
+        let selector: string | undefined;
+        try {
+          selector = this.resolve_selector_from_args_optional(tab_id, action);
+        } catch (error) {
+          const mapped_error = error as tool_error;
+          results.push({
+            type,
+            ok: false,
+            error: mapped_error.message,
+            error_code: mapped_error.code,
+          });
+          if (on_error === "stop") {
+            throw new tool_error(mapped_error.code, mapped_error.message, mapped_error.retryable, {
+              action_index: index + 1,
+              results,
+            });
+          }
+          continue;
+        }
         const result: Record<string, unknown> = { type, ok: true };
 
         if (selector) {
@@ -429,23 +510,80 @@ export class in_memory_bridge_transport implements bridge_transport {
           result.element_ref = action.element_ref;
         }
 
-        if ((type === "click" || type === "mouse_click" || type === "hover" || type === "mouse_move" || type === "type") && !selector) {
+        const has_coordinates = typeof action.x === "number" && typeof action.y === "number";
+        if (
+          (type === "click" ||
+            type === "hover" ||
+            type === "type" ||
+            type === "clear" ||
+            type === "select_option" ||
+            type === "file_upload" ||
+            type === "force_pseudo_state" ||
+            type === "scroll_into_view") &&
+          !selector
+        ) {
           result.ok = false;
           result.error_code = "INVALID_ARGUMENT";
           result.error = "selector or element_ref is required";
-          results.push(result);
-          break;
+        }
+
+        if ((type === "mouse_click" || type === "mouse_move") && !selector && !has_coordinates) {
+          result.ok = false;
+          result.error_code = "INVALID_ARGUMENT";
+          result.error = "selector or element_ref or x/y coordinates are required";
         }
 
         if (type === "type") {
           result.value = typeof action.text === "string" ? action.text : "";
         }
 
+        if (type === "file_upload") {
+          const files = Array.isArray(action.files) ? action.files.filter((value): value is string => typeof value === "string") : [];
+          if (files.length === 0) {
+            result.ok = false;
+            result.error_code = "INVALID_ARGUMENT";
+            result.error = "file_upload requires non-empty files[]";
+          } else {
+            result.files = files;
+          }
+        }
+
+        if (type === "force_pseudo_state") {
+          const pseudo_states = Array.isArray(action.pseudoStates)
+            ? action.pseudoStates.filter((value): value is string => typeof value === "string")
+            : typeof action.pseudo === "string"
+              ? [action.pseudo]
+              : typeof action.value === "string"
+                ? [action.value]
+                : [];
+
+          if (pseudo_states.length === 0 && !Array.isArray(action.pseudoStates)) {
+            result.ok = false;
+            result.error_code = "INVALID_ARGUMENT";
+            result.error = "force_pseudo_state requires pseudoStates or pseudo";
+          } else {
+            result.pseudo_states = pseudo_states;
+          }
+        }
+
         results.push(result);
+
+        if (!result.ok && on_error === "stop") {
+          throw new tool_error(
+            "INVALID_ARGUMENT",
+            String(result.error ?? `interaction failed at action ${index + 1}`),
+            false,
+            {
+              action_index: index + 1,
+              results,
+            },
+          );
+        }
       }
 
       return {
         tab_id,
+        on_error,
         results,
       };
     }
@@ -476,6 +614,74 @@ export class in_memory_bridge_transport implements bridge_transport {
           };
         }),
       };
+    }
+
+    if (tool_name === "browser_drag") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_drag", false);
+      }
+
+      const from_selector = this.resolve_required_selector_from_args(
+        tab_id,
+        {
+          selector: args.fromSelector,
+          element_ref: args.fromElementRef,
+        },
+        "browser_drag",
+      );
+      const to_selector = this.resolve_required_selector_from_args(
+        tab_id,
+        {
+          selector: args.toSelector,
+          element_ref: args.toElementRef,
+        },
+        "browser_drag",
+      );
+
+      return {
+        tab_id,
+        ok: true,
+        from_selector,
+        to_selector,
+        from_element_ref: typeof args.fromElementRef === "string" ? args.fromElementRef : undefined,
+        to_element_ref: typeof args.toElementRef === "string" ? args.toElementRef : undefined,
+      };
+    }
+
+    if (tool_name === "browser_window") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_window", false);
+      }
+
+      const action = typeof args.action === "string" ? args.action : "";
+      if (action === "resize") {
+        if (typeof args.width !== "number" || args.width <= 0 || typeof args.height !== "number" || args.height <= 0) {
+          throw new tool_error("INVALID_ARGUMENT", "browser_window resize requires positive width and height", false, {
+            args,
+          });
+        }
+
+        return {
+          tab_id,
+          action,
+          window_id: 1,
+          width: args.width,
+          height: args.height,
+          state: "normal",
+        };
+      }
+
+      if (action === "maximize" || action === "minimize" || action === "close") {
+        return {
+          tab_id,
+          action,
+          window_id: 1,
+          state: action === "maximize" ? "maximized" : action === "minimize" ? "minimized" : "closed",
+          closed: action === "close",
+        };
+      }
+
+      throw new tool_error("INVALID_ARGUMENT", `unsupported browser_window action: ${action}`, false, { args });
     }
 
     if (tool_name === "browser_get_element_styles") {
@@ -953,6 +1159,10 @@ export class websocket_bridge_transport implements bridge_transport {
       const url = casted_row.url;
       const title = casted_row.title;
       const debugger_attached = casted_row.debugger_attached;
+      const index = casted_row.index;
+      const active = casted_row.active;
+      const window_id = casted_row.window_id;
+      const stealth = casted_row.stealth;
 
       if (
         typeof tab_id !== "number" ||
@@ -963,7 +1173,16 @@ export class websocket_bridge_transport implements bridge_transport {
         continue;
       }
 
-      parsed_tabs.push({ tab_id, url, title, debugger_attached });
+      parsed_tabs.push({
+        tab_id,
+        url,
+        title,
+        debugger_attached,
+        index: typeof index === "number" ? index : undefined,
+        active: typeof active === "boolean" ? active : undefined,
+        window_id: typeof window_id === "number" ? window_id : undefined,
+        stealth: typeof stealth === "boolean" ? stealth : undefined,
+      });
     }
 
     return parsed_tabs;

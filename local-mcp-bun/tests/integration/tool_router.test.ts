@@ -411,3 +411,133 @@ test("browser_navigate invalidates element_ref handles", async () => {
 
   await runtime.stop();
 });
+
+test("browser_tabs attach can activate and enable stealth mode", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("attach-activate-stealth").agent_session_id;
+  const tabs_result = (await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "list",
+  })) as {
+    tabs: Array<Record<string, unknown>>;
+  };
+  const target_index = Number(tabs_result.tabs[0]?.index);
+
+  const attach_result = await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "attach",
+    index: target_index,
+    activate: true,
+    stealth: true,
+  });
+
+  expect(attach_result.action).toBe("attach");
+  expect(attach_result.activate).toBe(true);
+  expect(attach_result.stealth).toBe(true);
+
+  const updated_tabs_result = (await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "list",
+  })) as {
+    tabs: Array<Record<string, unknown>>;
+  };
+  const attached_tab = updated_tabs_result.tabs.find((tab) => tab.index === target_index);
+  expect(attached_tab?.active).toBe(true);
+  expect(attached_tab?.stealth).toBe(true);
+
+  await runtime.stop();
+});
+
+test("browser_tabs close resolves explicit index", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("close-by-index").agent_session_id;
+  const create_result = await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "new",
+    url: "https://close-index.example",
+  });
+  expect(typeof create_result.tab_id).toBe("number");
+
+  const before_close = (await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "list",
+  })) as {
+    tabs: Array<Record<string, unknown>>;
+  };
+  const created_tab = before_close.tabs.find((tab) => tab.tab_id === create_result.tab_id);
+  expect(created_tab).toBeDefined();
+
+  const close_result = await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "close",
+    index: created_tab?.index,
+  });
+  expect(close_result.closed).toBe(true);
+  expect(close_result.index).toBe(created_tab?.index);
+
+  const after_close = (await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+    action: "list",
+  })) as {
+    tabs: Array<Record<string, unknown>>;
+  };
+  expect(after_close.tabs.some((tab) => tab.tab_id === create_result.tab_id)).toBe(false);
+
+  await runtime.stop();
+});
+
+test("browser_interact onError=ignore continues past action failures", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("interact-ignore").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const interact_result = await runtime.tool_router.call_tool(session_id, "browser_interact", {
+    onError: "ignore",
+    actions: [
+      { type: "click", selector: "button.primary-action" },
+      { type: "file_upload", selector: "input[type=file]" },
+      { type: "mouse_move", x: 32, y: 48 },
+    ],
+  });
+
+  const results = interact_result.results as Array<Record<string, unknown>>;
+  expect(interact_result.on_error).toBe("ignore");
+  expect(results).toHaveLength(3);
+  expect(results[0]?.ok).toBe(true);
+  expect(results[1]?.ok).toBe(false);
+  expect(results[1]?.error_code).toBe("INVALID_ARGUMENT");
+  expect(results[2]?.ok).toBe(true);
+
+  await runtime.stop();
+});
+
+test("browser_window resize requires explicit dimensions", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("window-validate").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_window", {
+      action: "resize",
+    });
+    throw new Error("expected resize validation error");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+  }
+
+  await runtime.stop();
+});

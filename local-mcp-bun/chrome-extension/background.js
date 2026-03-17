@@ -24,6 +24,9 @@ const element_refs_by_tab = new Map();
 /** @type {Map<number, number>} */
 const element_ref_revision_by_tab = new Map();
 
+/** @type {Map<number, boolean>} */
+const stealth_mode_by_tab = new Map();
+
 let bridge_socket = null;
 let bridge_url = default_bridge_url;
 let mcp_port = default_mcp_port;
@@ -807,6 +810,126 @@ async function navigate_to_tab(tab_id) {
   };
 }
 
+async function apply_stealth_to_tab(tab_id) {
+  const resolved_tab_id = assert_tab_id(tab_id);
+  if (stealth_mode_by_tab.get(resolved_tab_id) !== true) {
+    return;
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: resolved_tab_id },
+      world: "MAIN",
+      injectImmediately: true,
+      func: () => {
+        const global_object = globalThis;
+        if (global_object.__local_mcp_stealth_applied__ === true) {
+          return true;
+        }
+
+        Object.defineProperty(global_object, "__local_mcp_stealth_applied__", {
+          value: true,
+          configurable: false,
+          enumerable: false,
+        });
+
+        function redefine_getter(target, property, getter) {
+          try {
+            Object.defineProperty(target, property, {
+              configurable: true,
+              get: getter,
+            });
+          } catch {
+            // ignore best-effort stealth patch failures
+          }
+        }
+
+        const original_languages_getter = Object.getOwnPropertyDescriptor(Navigator.prototype, "languages")?.get;
+        redefine_getter(Navigator.prototype, "languages", function get_languages() {
+          try {
+            const languages = original_languages_getter ? original_languages_getter.call(this) : undefined;
+            return Array.isArray(languages) && languages.length > 0 ? languages : ["en-US", "en"];
+          } catch {
+            return ["en-US", "en"];
+          }
+        });
+
+        const original_plugins_getter = Object.getOwnPropertyDescriptor(Navigator.prototype, "plugins")?.get;
+        redefine_getter(Navigator.prototype, "plugins", function get_plugins() {
+          try {
+            const plugins = original_plugins_getter ? original_plugins_getter.call(this) : undefined;
+            if (plugins && typeof plugins.length === "number" && plugins.length > 0) {
+              return plugins;
+            }
+          } catch {
+            // fall through to synthetic plugins
+          }
+
+          return {
+            0: { name: "Chrome PDF Plugin" },
+            1: { name: "Chrome PDF Viewer" },
+            2: { name: "Native Client" },
+            length: 3,
+            item(index) {
+              return this[index] ?? null;
+            },
+            namedItem() {
+              return null;
+            },
+            refresh() {},
+          };
+        });
+
+        redefine_getter(Navigator.prototype, "webdriver", () => undefined);
+
+        if (!("chrome" in global_object)) {
+          Object.defineProperty(global_object, "chrome", {
+            value: { runtime: {} },
+            configurable: true,
+          });
+        }
+
+        try {
+          const permissions = navigator.permissions;
+          if (permissions?.query) {
+            const original_query = permissions.query.bind(permissions);
+            Object.defineProperty(permissions, "query", {
+              configurable: true,
+              value(parameters) {
+                if (parameters?.name === "notifications") {
+                  return Promise.resolve({
+                    state: Notification.permission,
+                    onchange: null,
+                  });
+                }
+
+                return original_query(parameters);
+              },
+            });
+          }
+        } catch {
+          // ignore permissions patch failures
+        }
+
+        return true;
+      },
+    });
+  } catch (error) {
+    log_warn("stealth injection failed", error);
+  }
+}
+
+async function set_tab_stealth_mode(tab_id, enabled) {
+  const resolved_tab_id = assert_tab_id(tab_id);
+  if (enabled) {
+    stealth_mode_by_tab.set(resolved_tab_id, true);
+    await apply_stealth_to_tab(resolved_tab_id);
+    return;
+  }
+
+  stealth_mode_by_tab.delete(resolved_tab_id);
+}
+
 function register_ui_message_listener() {
   chrome.runtime.onMessage.addListener((message, _sender, send_response) => {
     if (!message || typeof message.type !== "string" || !message.type.startsWith("ui_")) {
@@ -903,6 +1026,10 @@ function register_runtime_listeners() {
       reset_element_refs_for_tab(tab_id);
     }
 
+    if (typeof tab_id === "number" && stealth_mode_by_tab.get(tab_id) === true && (change_info.status === "loading" || Boolean(change_info.url))) {
+      void apply_stealth_to_tab(tab_id);
+    }
+
     if (!change_info.url && !change_info.status) {
       return;
     }
@@ -917,6 +1044,7 @@ function register_runtime_listeners() {
     network_requests_by_tab.delete(tab_id);
     console_messages_by_tab.delete(tab_id);
     clear_element_refs_for_tab(tab_id);
+    stealth_mode_by_tab.delete(tab_id);
 
     send_json({
       type: "detach_notice",
@@ -933,16 +1061,16 @@ function register_runtime_listeners() {
 function register_debugger_detach_listener() {
   chrome.debugger.onDetach.addListener((source, reason) => {
     const tab_id = source.tabId;
-  if (typeof tab_id !== "number") {
-    return;
-  }
+    if (typeof tab_id !== "number") {
+      return;
+    }
 
-  attached_tab_ids.delete(tab_id);
-  network_requests_by_tab.delete(tab_id);
-  clear_element_refs_for_tab(tab_id);
+    attached_tab_ids.delete(tab_id);
+    network_requests_by_tab.delete(tab_id);
+    clear_element_refs_for_tab(tab_id);
 
-  send_json({
-    type: "detach_notice",
+    send_json({
+      type: "detach_notice",
       tab_id,
       reason,
     });
@@ -1055,6 +1183,7 @@ async function get_tabs_snapshot() {
       active: tab.active === true,
       window_id: tab.windowId,
       debugger_attached: attached_tab_ids.has(tab.id),
+      stealth: stealth_mode_by_tab.get(tab.id) === true,
     }));
 }
 
@@ -1162,13 +1291,45 @@ async function execute_browser_tabs(args, tab_id) {
   if (action === "new") {
     const url = typeof args.url === "string" && args.url.length > 0 ? args.url : "about:blank";
     const activate = args.activate !== false;
+    const stealth = args.stealth === true;
     const created_tab = await chrome.tabs.create({ url, active: activate });
+    if (typeof created_tab.id === "number" && stealth) {
+      await set_tab_stealth_mode(created_tab.id, true);
+    }
 
     return {
       tab_id: created_tab.id,
       url: created_tab.url,
       title: created_tab.title,
       index: created_tab.index,
+      active: created_tab.active === true,
+      stealth,
+    };
+  }
+
+  if (action === "activate") {
+    const resolved_tab_id =
+      typeof args.tab_id === "number" ? args.tab_id : typeof tab_id === "number" ? tab_id : undefined;
+    const activated_tab = await navigate_to_tab(resolved_tab_id);
+    return {
+      ...activated_tab,
+      active: true,
+    };
+  }
+
+  if (action === "set_stealth") {
+    const resolved_tab_id =
+      typeof args.tab_id === "number" ? args.tab_id : typeof tab_id === "number" ? tab_id : undefined;
+    if (typeof resolved_tab_id !== "number") {
+      throw new Error("browser_tabs set_stealth requires tab_id");
+    }
+
+    const stealth = args.stealth === true;
+    await set_tab_stealth_mode(resolved_tab_id, stealth);
+    return {
+      tab_id: resolved_tab_id,
+      stealth,
+      reload_recommended: stealth !== true,
     };
   }
 
@@ -1182,6 +1343,7 @@ async function execute_browser_tabs(args, tab_id) {
 
     await chrome.tabs.remove(resolved_tab_id);
     attached_tab_ids.delete(resolved_tab_id);
+    stealth_mode_by_tab.delete(resolved_tab_id);
 
     return {
       closed: true,
@@ -1363,14 +1525,14 @@ async function wait_for_selector(tab_id, selector, timeout_ms) {
   });
 }
 
-async function force_pseudo_state(tab_id, selector, pseudo_state) {
+async function force_pseudo_state(tab_id, selector, pseudo_states) {
   const node_id = await resolve_dom_node_id(tab_id, selector);
   await send_debugger_command(tab_id, "CSS.enable", {});
   const forced_pseudo_classes =
-    Array.isArray(pseudo_state)
-      ? pseudo_state.filter((entry) => typeof entry === "string" && entry.length > 0)
-      : typeof pseudo_state === "string" && pseudo_state.length > 0
-        ? [pseudo_state]
+    Array.isArray(pseudo_states)
+      ? pseudo_states.filter((entry) => typeof entry === "string" && entry.length > 0)
+      : typeof pseudo_states === "string" && pseudo_states.length > 0
+        ? [pseudo_states]
         : [];
   await send_debugger_command(tab_id, "CSS.forcePseudoState", {
     nodeId: node_id,
@@ -1819,6 +1981,7 @@ async function execute_browser_interact(args, tab_id) {
     : typeof args?.action === "string"
       ? [{ ...args, type: args.action }]
       : [];
+  const on_error = args?.onError === "ignore" ? "ignore" : "stop";
 
   if (actions.length === 0) {
     throw new Error("browser_interact requires action or non-empty actions array");
@@ -1826,224 +1989,297 @@ async function execute_browser_interact(args, tab_id) {
 
   const results = [];
 
-  for (const raw_action of actions) {
+  for (let index = 0; index < actions.length; index += 1) {
+    const raw_action = actions[index];
     const action = raw_action && typeof raw_action === "object" ? { ...raw_action } : {};
     const type = action?.type;
 
-    if (type === "wait") {
-      const timeout = typeof action?.timeout === "number" ? action.timeout : 250;
-      const wait_target = await resolve_selector_target(action, resolved_tab_id);
-      if (wait_target.selector) {
-        await wait_for_selector(resolved_tab_id, wait_target.selector, timeout);
-      } else {
-        await sleep(timeout);
-      }
-      results.push({
-        type,
-        ok: true,
-        selector: wait_target.selector || undefined,
-        element_ref: wait_target.element_ref,
-      });
-      continue;
-    }
-
-    if (type === "mouse_move" || type === "hover") {
-      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
-      const point = await get_selector_center(resolved_tab_id, resolved_target.selector);
-      await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, "none", 0, 0);
-      results.push({
-        type,
-        ok: true,
-        selector: resolved_target.selector,
-        element_ref: resolved_target.element_ref,
-      });
-      continue;
-    }
-
-    if (type === "mouse_click" || type === "click") {
-      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
-      const point = await get_selector_center(resolved_tab_id, resolved_target.selector);
-      await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, "left", 1, 0);
-      await dispatch_mouse_event(resolved_tab_id, "mousePressed", point.x, point.y, "left", 1, 1);
-      await dispatch_mouse_event(resolved_tab_id, "mouseReleased", point.x, point.y, "left", 1, 0);
-      results.push({
-        type,
-        ok: true,
-        selector: resolved_target.selector,
-        element_ref: resolved_target.element_ref,
-      });
-      continue;
-    }
-
-    if (type === "file_upload") {
-      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
-      const files = Array.isArray(action?.files) ? action.files.filter((value) => typeof value === "string") : [];
-      if (files.length === 0) {
-        throw create_extension_error("INVALID_ARGUMENT", "file_upload requires non-empty files[]", {
-          tab_id: resolved_tab_id,
-          selector: resolved_target.selector,
+    try {
+      if (type === "wait") {
+        const timeout = typeof action?.timeout === "number" ? action.timeout : 250;
+        const wait_target = await resolve_selector_target(action, resolved_tab_id);
+        if (wait_target.selector) {
+          await wait_for_selector(resolved_tab_id, wait_target.selector, timeout);
+        } else {
+          await sleep(timeout);
+        }
+        results.push({
+          type,
+          ok: true,
+          selector: wait_target.selector || undefined,
+          element_ref: wait_target.element_ref,
         });
+        continue;
       }
 
-      const node_id = await resolve_dom_node_id(resolved_tab_id, resolved_target.selector);
-      await send_debugger_command(resolved_tab_id, "DOM.setFileInputFiles", {
-        nodeId: node_id,
-        files,
-      });
-      results.push({
-        type,
-        ok: true,
-        selector: resolved_target.selector,
-        element_ref: resolved_target.element_ref,
-        files,
-      });
-      continue;
-    }
-
-    if (type === "force_pseudo_state") {
-      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
-      const pseudo = typeof action?.pseudo === "string" ? action.pseudo : typeof action?.value === "string" ? action.value : "";
-      if (!pseudo) {
-        throw create_extension_error("INVALID_ARGUMENT", "force_pseudo_state requires pseudo", {
-          tab_id: resolved_tab_id,
+      if (type === "mouse_move" || type === "hover") {
+        let point;
+        let resolved_target = { selector: undefined, element_ref: undefined };
+        if (typeof action?.x === "number" && typeof action?.y === "number" && type === "mouse_move") {
+          point = { x: action.x, y: action.y };
+        } else {
+          resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+          point = await get_selector_center(resolved_tab_id, resolved_target.selector);
+        }
+        await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, "none", 0, 0);
+        results.push({
+          type,
+          ok: true,
+          x: point.x,
+          y: point.y,
           selector: resolved_target.selector,
+          element_ref: resolved_target.element_ref,
         });
+        continue;
       }
 
-      await force_pseudo_state(resolved_tab_id, resolved_target.selector, pseudo);
-      results.push({
-        type,
-        ok: true,
+      if (type === "mouse_click" || type === "click") {
+        let point;
+        let resolved_target = { selector: undefined, element_ref: undefined };
+        if (typeof action?.x === "number" && typeof action?.y === "number" && type === "mouse_click") {
+          point = { x: action.x, y: action.y };
+        } else {
+          resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+          point = await get_selector_center(resolved_tab_id, resolved_target.selector);
+        }
+        const button = typeof action?.button === "string" ? action.button : "left";
+        const click_count =
+          typeof action?.clickCount === "number" && Number.isInteger(action.clickCount) && action.clickCount > 0
+            ? action.clickCount
+            : 1;
+        await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, button, click_count, 0);
+        await dispatch_mouse_event(resolved_tab_id, "mousePressed", point.x, point.y, button, click_count, 1);
+        await dispatch_mouse_event(resolved_tab_id, "mouseReleased", point.x, point.y, button, click_count, 0);
+        results.push({
+          type,
+          ok: true,
+          x: point.x,
+          y: point.y,
+          button,
+          click_count,
+          selector: resolved_target.selector,
+          element_ref: resolved_target.element_ref,
+        });
+        continue;
+      }
+
+      if (type === "file_upload") {
+        const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+        const files = Array.isArray(action?.files) ? action.files.filter((value) => typeof value === "string") : [];
+        if (files.length === 0) {
+          throw create_extension_error("INVALID_ARGUMENT", "file_upload requires non-empty files[]", {
+            tab_id: resolved_tab_id,
+            selector: resolved_target.selector,
+          });
+        }
+
+        const node_id = await resolve_dom_node_id(resolved_tab_id, resolved_target.selector);
+        await send_debugger_command(resolved_tab_id, "DOM.setFileInputFiles", {
+          nodeId: node_id,
+          files,
+        });
+        results.push({
+          type,
+          ok: true,
+          selector: resolved_target.selector,
+          element_ref: resolved_target.element_ref,
+          files,
+        });
+        continue;
+      }
+
+      if (type === "force_pseudo_state") {
+        const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+        const pseudo_states = Array.isArray(action?.pseudoStates)
+          ? action.pseudoStates.filter((value) => typeof value === "string")
+          : typeof action?.pseudo === "string"
+            ? [action.pseudo]
+            : typeof action?.value === "string"
+              ? [action.value]
+              : [];
+
+        if (pseudo_states.length === 0 && !Array.isArray(action?.pseudoStates)) {
+          throw create_extension_error("INVALID_ARGUMENT", "force_pseudo_state requires pseudoStates or pseudo", {
+            tab_id: resolved_tab_id,
+            selector: resolved_target.selector,
+          });
+        }
+
+        await force_pseudo_state(resolved_tab_id, resolved_target.selector, pseudo_states);
+        results.push({
+          type,
+          ok: true,
+          selector: resolved_target.selector,
+          element_ref: resolved_target.element_ref,
+          pseudo_states,
+        });
+        continue;
+      }
+
+      const resolved_target = await resolve_selector_target(action, resolved_tab_id);
+      const prepared_action = {
+        ...action,
         selector: resolved_target.selector,
-        element_ref: resolved_target.element_ref,
-        pseudo,
-      });
-      continue;
-    }
+      };
 
-    const resolved_target = await resolve_selector_target(action, resolved_tab_id);
-    const prepared_action = {
-      ...action,
-      selector: resolved_target.selector,
-    };
+      const action_result = await execute_in_tab(resolved_tab_id, (incoming_action) => {
+        const action_type = incoming_action.type;
+        const selector = incoming_action.selector;
 
-    const action_result = await execute_in_tab(resolved_tab_id, (incoming_action) => {
-      const action_type = incoming_action.type;
-      const selector = incoming_action.selector;
-
-      function resolve_target() {
-        if (!selector || typeof selector !== "string") {
-          return document.body;
-        }
-
-        return document.querySelector(selector);
-      }
-
-      const target = resolve_target();
-      if (!target) {
-        return {
-          type: action_type,
-          ok: false,
-          error: `selector not found: ${selector}`,
-        };
-      }
-
-      if (action_type === "click") {
-        target.click();
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "type") {
-        const text = typeof incoming_action.text === "string" ? incoming_action.text : "";
-        if ("value" in target) {
-          target.value = text;
-          target.dispatchEvent(new Event("input", { bubbles: true }));
-          target.dispatchEvent(new Event("change", { bubbles: true }));
-          return { type: action_type, ok: true };
-        }
-
-        return { type: action_type, ok: false, error: "target has no value field" };
-      }
-
-      if (action_type === "clear") {
-        if ("value" in target) {
-          target.value = "";
-          target.dispatchEvent(new Event("input", { bubbles: true }));
-          target.dispatchEvent(new Event("change", { bubbles: true }));
-          return { type: action_type, ok: true };
-        }
-
-        return { type: action_type, ok: false, error: "target has no value field" };
-      }
-
-      if (action_type === "press_key") {
-        const key = typeof incoming_action.key === "string" ? incoming_action.key : "Enter";
-        target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
-        target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "hover") {
-        target.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "scroll_into_view") {
-        target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "scroll_to") {
-        window.scrollTo(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "scroll_by") {
-        window.scrollBy(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
-        return { type: action_type, ok: true };
-      }
-
-      if (action_type === "select_option") {
-        if (target.tagName.toLowerCase() !== "select") {
-          return { type: action_type, ok: false, error: "target is not select element" };
-        }
-
-        const select_element = target;
-        const value = String(incoming_action.value ?? "");
-
-        let matched = false;
-        for (const option of Array.from(select_element.options)) {
-          if (option.value === value || option.text === value) {
-            select_element.value = option.value;
-            matched = true;
-            break;
+        function resolve_target() {
+          if (!selector || typeof selector !== "string") {
+            return document.body;
           }
+
+          return document.querySelector(selector);
         }
 
-        if (!matched) {
-          return { type: action_type, ok: false, error: `option not found: ${value}` };
+        const target = resolve_target();
+        if (!target) {
+          return {
+            type: action_type,
+            ok: false,
+            error: `selector not found: ${selector}`,
+          };
         }
 
-        select_element.dispatchEvent(new Event("change", { bubbles: true }));
-        return { type: action_type, ok: true };
+        if (action_type === "click") {
+          target.click();
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "type") {
+          const text = typeof incoming_action.text === "string" ? incoming_action.text : "";
+          if ("value" in target) {
+            target.value = text;
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            return { type: action_type, ok: true };
+          }
+
+          return { type: action_type, ok: false, error: "target has no value field" };
+        }
+
+        if (action_type === "clear") {
+          if ("value" in target) {
+            target.value = "";
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            return { type: action_type, ok: true };
+          }
+
+          return { type: action_type, ok: false, error: "target has no value field" };
+        }
+
+        if (action_type === "press_key") {
+          const key = typeof incoming_action.key === "string" ? incoming_action.key : "Enter";
+          target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+          target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "hover") {
+          target.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "scroll_into_view") {
+          target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "scroll_to") {
+          if (selector && typeof target.scrollTo === "function") {
+            target.scrollTo(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
+          } else {
+            window.scrollTo(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
+          }
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "scroll_by") {
+          if (selector && typeof target.scrollBy === "function") {
+            target.scrollBy(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
+          } else {
+            window.scrollBy(Number(incoming_action.x || 0), Number(incoming_action.y || 0));
+          }
+          return { type: action_type, ok: true };
+        }
+
+        if (action_type === "select_option") {
+          if (target.tagName.toLowerCase() !== "select") {
+            return { type: action_type, ok: false, error: "target is not select element" };
+          }
+
+          const select_element = target;
+          const value = String(incoming_action.value ?? "");
+
+          let matched = false;
+          for (const option of Array.from(select_element.options)) {
+            if (option.value === value || option.text === value || option.text.toLowerCase() === value.toLowerCase()) {
+              select_element.value = option.value;
+              matched = true;
+              break;
+            }
+          }
+
+          if (!matched) {
+            return { type: action_type, ok: false, error: `option not found: ${value}` };
+          }
+
+          select_element.dispatchEvent(new Event("change", { bubbles: true }));
+          return { type: action_type, ok: true };
+        }
+
+        return { type: action_type, ok: false, error: `unsupported interaction type: ${action_type}` };
+      }, prepared_action);
+
+      results.push({
+        ...action_result,
+        selector: resolved_target.selector || undefined,
+        element_ref: resolved_target.element_ref,
+      });
+
+      if (!action_result?.ok && on_error === "stop") {
+        throw create_extension_error(
+          "INVALID_ARGUMENT",
+          typeof action_result?.error === "string" ? action_result.error : `interaction failed at action ${index + 1}`,
+          {
+            action_index: index + 1,
+            results,
+          },
+        );
+      }
+    } catch (error) {
+      const failure = {
+        type,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        error_code: typeof error?.code === "string" ? error.code : undefined,
+      };
+      const last_result = results[results.length - 1];
+      if (!last_result || last_result.type !== type || last_result.ok !== false) {
+        results.push(failure);
       }
 
-      return { type: action_type, ok: false, error: `unsupported interaction type: ${action_type}` };
-    }, prepared_action);
-
-    results.push({
-      ...action_result,
-      selector: resolved_target.selector || undefined,
-      element_ref: resolved_target.element_ref,
-    });
-
-    if (!action_result?.ok) {
-      break;
+      if (on_error === "stop") {
+        throw create_extension_error(
+          typeof error?.code === "string" ? error.code : "INVALID_ARGUMENT",
+          failure.error,
+          {
+            action_index: index + 1,
+            on_error,
+            results,
+          },
+          error?.retryable === true,
+        );
+      }
     }
   }
 
   return {
     tab_id: resolved_tab_id,
+    on_error,
     results,
   };
 }
@@ -2093,7 +2329,7 @@ async function execute_browser_fill_form(args, tab_id) {
         const expected = String(value ?? "");
         let matched = false;
         for (const option of Array.from(select.options)) {
-          if (option.value === expected || option.text === expected) {
+          if (option.value === expected || option.text === expected || option.text.toLowerCase() === expected.toLowerCase()) {
             select.value = option.value;
             matched = true;
             break;
@@ -2531,28 +2767,42 @@ async function execute_browser_window(args, tab_id) {
 
   const action = args?.action;
   if (action === "resize") {
-    const width = typeof args?.width === "number" ? args.width : 1280;
-    const height = typeof args?.height === "number" ? args.height : 720;
-    await chrome.windows.update(tab.windowId, { width, height, state: "normal" });
-    return { action, window_id: tab.windowId, width, height };
+    if (typeof args?.width !== "number" || args.width <= 0 || typeof args?.height !== "number" || args.height <= 0) {
+      throw create_extension_error("INVALID_ARGUMENT", "browser_window resize requires positive width and height", {
+        tab_id: resolved_tab_id,
+        args,
+      });
+    }
+
+    const updated = await chrome.windows.update(tab.windowId, { width: args.width, height: args.height, state: "normal" });
+    return {
+      action,
+      window_id: tab.windowId,
+      width: updated.width,
+      height: updated.height,
+      state: updated.state,
+    };
   }
 
   if (action === "maximize") {
-    await chrome.windows.update(tab.windowId, { state: "maximized" });
-    return { action, window_id: tab.windowId };
+    const updated = await chrome.windows.update(tab.windowId, { state: "maximized" });
+    return { action, window_id: tab.windowId, state: updated.state };
   }
 
   if (action === "minimize") {
-    await chrome.windows.update(tab.windowId, { state: "minimized" });
-    return { action, window_id: tab.windowId };
+    const updated = await chrome.windows.update(tab.windowId, { state: "minimized" });
+    return { action, window_id: tab.windowId, state: updated.state };
   }
 
   if (action === "close") {
     await chrome.windows.remove(tab.windowId);
-    return { action, window_id: tab.windowId };
+    return { action, window_id: tab.windowId, closed: true, state: "closed" };
   }
 
-  throw new Error(`unsupported browser_window action: ${action}`);
+  throw create_extension_error("INVALID_ARGUMENT", `unsupported browser_window action: ${action}`, {
+    tab_id: resolved_tab_id,
+    action,
+  });
 }
 
 async function execute_browser_handle_dialog(args, tab_id) {
@@ -2708,6 +2958,10 @@ async function attach_to_tab(tab_id) {
   } catch (error) {
     log_warn("debugger domain enable failed", error);
   }
+
+  if (stealth_mode_by_tab.get(resolved_tab_id) === true) {
+    await apply_stealth_to_tab(resolved_tab_id);
+  }
 }
 
 async function detach_from_tab(tab_id) {
@@ -2728,6 +2982,7 @@ async function detach_from_tab(tab_id) {
       network_requests_by_tab.delete(resolved_tab_id);
       console_messages_by_tab.delete(resolved_tab_id);
       clear_element_refs_for_tab(resolved_tab_id);
+      stealth_mode_by_tab.delete(resolved_tab_id);
       resolve(undefined);
     });
   });
