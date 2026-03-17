@@ -170,6 +170,26 @@ export class tool_router {
         continue;
       }
 
+      if (tool_name === "browser_navigate") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_navigate. Navigates the attached tab to a URL, history target, reload, or local test page.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: ["url", "back", "forward", "reload", "test_page"],
+              },
+              url: { type: "string" },
+            },
+            required: ["action"],
+          },
+        });
+        continue;
+      }
+
       if (tool_name === "browser_interact") {
         base_tools.push({
           name: tool_name,
@@ -186,13 +206,20 @@ export class tool_router {
               key: { type: "string" },
               timeout: { type: "number", minimum: 0 },
               pseudo: { type: "string" },
-              value: {},
-              x: { type: "number" },
-              y: { type: "number" },
+              pseudoStates: {
+                type: "array",
+                items: { type: "string" },
+              },
               files: {
                 type: "array",
                 items: { type: "string" },
               },
+              value: {},
+              x: { type: "number" },
+              y: { type: "number" },
+              button: { type: "string", enum: ["left", "right", "middle"] },
+              clickCount: { type: "number", minimum: 1 },
+              onError: { type: "string", enum: ["stop", "ignore"] },
               actions: {
                 type: "array",
                 minItems: 1,
@@ -327,6 +354,59 @@ export class tool_router {
         continue;
       }
 
+      if (tool_name === "browser_window") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_window. Resizes, maximizes, minimizes, or closes the attached tab window.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: ["resize", "maximize", "minimize", "close"],
+              },
+              width: { type: "number", minimum: 1 },
+              height: { type: "number", minimum: 1 },
+            },
+            required: ["action"],
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_verify_text_visible") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_verify_text_visible. Checks whether the provided text is visible in the attached tab.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              text: { type: "string" },
+            },
+            required: ["text"],
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_verify_element_visible") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_verify_element_visible. Checks whether the selector or element_ref target is visible in the attached tab.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              selector: { type: "string" },
+              element_ref: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
       base_tools.push({
         name: tool_name,
         description: `Forwarded browser tool: ${tool_name}`,
@@ -347,6 +427,8 @@ export class tool_router {
           index: { type: "number" },
           url: { type: "string" },
           tab_id: { type: "number" },
+          activate: { type: "boolean" },
+          stealth: { type: "boolean" },
         },
         required: ["action"],
       },
@@ -706,18 +788,55 @@ export class tool_router {
         throw new tool_error("TAB_NOT_FOUND", `tab index ${index} not found`, false, { index });
       }
 
+      const activate = args.activate === true;
+      const stealth = args.stealth === true;
+
       const attach_result = await this.attach_to_tab(agent_session_id, { tab_id });
+
+      if (stealth) {
+        await this.bridge_transport.call_tool(
+          "browser_tabs",
+          {
+            action: "set_stealth",
+            tab_id,
+            stealth,
+          },
+          agent_session_id,
+        );
+      }
+
+      if (activate) {
+        await this.bridge_transport.call_tool(
+          "browser_tabs",
+          {
+            action: "activate",
+            tab_id,
+          },
+          agent_session_id,
+        );
+      }
+
       return {
         action: "attach",
+        activate,
+        stealth,
         ...attach_result,
       };
     }
 
     if (action === "new") {
-      const create_result = (await this.bridge_transport.call_tool("browser_tabs", {
-        action: "new",
-        url: typeof args.url === "string" ? args.url : "about:blank",
-      }, agent_session_id)) as Record<string, unknown>;
+      const activate = args.activate !== false;
+      const stealth = args.stealth === true;
+      const create_result = (await this.bridge_transport.call_tool(
+        "browser_tabs",
+        {
+          action: "new",
+          url: typeof args.url === "string" ? args.url : "about:blank",
+          activate,
+          stealth,
+        },
+        agent_session_id,
+      )) as Record<string, unknown>;
 
       const tab_id = create_result.tab_id;
       if (typeof tab_id !== "number") {
@@ -729,6 +848,8 @@ export class tool_router {
       const attach_result = await this.attach_to_tab(agent_session_id, { tab_id });
       return {
         action: "new",
+        activate,
+        stealth,
         ...attach_result,
         created_tab: create_result,
       };
@@ -736,10 +857,39 @@ export class tool_router {
 
     if (action === "close") {
       const explicit_tab_id = args.tab_id;
-      const tab_id =
+      const explicit_index = args.index;
+      let tab_id =
         typeof explicit_tab_id === "number" && Number.isInteger(explicit_tab_id) && explicit_tab_id > 0
           ? explicit_tab_id
-          : this.active_tab_by_session.get(agent_session_id);
+          : undefined;
+
+      if (
+        typeof tab_id !== "number" &&
+        typeof explicit_index === "number" &&
+        Number.isInteger(explicit_index) &&
+        explicit_index >= 0
+      ) {
+        const tabs_response = (await this.bridge_transport.call_tool(
+          "browser_tabs",
+          { action: "list" },
+          agent_session_id,
+        )) as {
+          tabs?: Array<Record<string, unknown>>;
+        };
+        const tabs = Array.isArray(tabs_response.tabs) ? tabs_response.tabs : [];
+        const matched_tab = tabs.find((tab) => tab.index === explicit_index);
+        const matched_tab_id = matched_tab?.tab_id;
+        if (typeof matched_tab_id !== "number") {
+          throw new tool_error("TAB_NOT_FOUND", `tab index ${explicit_index} not found`, false, {
+            index: explicit_index,
+          });
+        }
+        tab_id = matched_tab_id;
+      }
+
+      if (typeof tab_id !== "number") {
+        tab_id = this.active_tab_by_session.get(agent_session_id);
+      }
 
       await this.bridge_transport.call_tool(
         "browser_tabs",
@@ -763,6 +913,7 @@ export class tool_router {
       return {
         action: "close",
         tab_id,
+        index: typeof explicit_index === "number" ? explicit_index : undefined,
         closed: true,
       };
     }

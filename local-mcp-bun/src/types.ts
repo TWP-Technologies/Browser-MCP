@@ -31,6 +31,10 @@ export interface tab_snapshot {
   url: string;
   title: string;
   debugger_attached: boolean;
+  index?: number;
+  active?: boolean;
+  window_id?: number;
+  stealth?: boolean;
 }
 
 export interface listed_tab_snapshot extends tab_snapshot {
