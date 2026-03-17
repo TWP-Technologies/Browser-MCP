@@ -2476,6 +2476,7 @@ async function execute_browser_snapshot(tab_id) {
     const primary_candidates = [root];
     const secondary_candidates = [];
     const max_discovered = 360;
+    let discovery_capped = false;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     for (let current = walker.nextNode(); current; current = walker.nextNode()) {
       const element = current;
@@ -2495,6 +2496,7 @@ async function execute_browser_snapshot(tab_id) {
       }
 
       if (primary_candidates.length + secondary_candidates.length >= max_discovered) {
+        discovery_capped = true;
         break;
       }
     }
@@ -2543,7 +2545,7 @@ async function execute_browser_snapshot(tab_id) {
       title: document.title,
       viewport,
       nodes,
-      truncated: primary_candidates.length + secondary_candidates.length > nodes.length,
+      truncated: discovery_capped || candidates.length > max_scored || nodes.length >= 120,
     };
   });
 

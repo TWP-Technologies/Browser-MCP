@@ -49,8 +49,8 @@ f8cb742 test(e2e): use loopback fixture for direct screenshots
 7149e50 fix(extension): address post-merge bot followups
 432a7c9 docs(agent-logs): record parity closeout sessions
 55b8b26 docs(agent-logs): record parity closeout sessions
-78ef38b feat(extension): close remaining blueprint parity gaps
-7fb53e7 feat(extension): close remaining blueprint parity gaps
+78ef38b feat(extension): close remaining parity gaps
+7fb53e7 feat(extension): close remaining parity gaps
 dfe93f3 feat(extension): add interaction and navigation parity
 2a6276b fix(extension): align interaction parity edge cases
 ```

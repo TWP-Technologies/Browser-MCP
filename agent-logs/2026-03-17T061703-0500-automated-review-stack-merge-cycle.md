@@ -11,7 +11,7 @@
 - Browser-MCP: `03-17-feat_extension_add_interaction_and_navigation_parity @ 2a6276b`
   - Additional review-fix commit landed during this session: `1f45411`
   - Merged to `trunk` at `2026-03-17T11:14:00Z`
-- Browser-MCP: `03-17-feat_extension_close_remaining_blueprint_parity_gaps @ 7fb53e7`
+- Browser-MCP: `03-17-feat_extension_close_remaining_parity_gaps @ 7fb53e7`
   - No new code changes were needed in this session after restacking onto `trunk`
   - Merged to `trunk` at `2026-03-17T11:15:20Z`
 - Browser-MCP: `03-17-docs_agent-logs_record_parity_closeout_sessions @ 55b8b26`
@@ -66,8 +66,8 @@
 ## Relevant recent commits
 
 - `55b8b26` docs(agent-logs): record parity closeout sessions
-- `78ef38b` feat(extension): close remaining blueprint parity gaps
-- `7fb53e7` feat(extension): close remaining blueprint parity gaps
+- `78ef38b` feat(extension): close remaining parity gaps
+- `7fb53e7` feat(extension): close remaining parity gaps
 - `dfe93f3` feat(extension): add interaction and navigation parity
 - `2a6276b` fix(extension): align interaction parity edge cases
 - `80a8010` feat(extension): add interaction and navigation parity
