@@ -1181,29 +1181,180 @@ async function execute_browser_snapshot(tab_id) {
   };
 }
 
-async function execute_browser_take_screenshot(args, tab_id) {
-  const resolved_tab_id = assert_tab_id(tab_id);
-  const tab = await chrome.tabs.get(resolved_tab_id);
-
-  if (!tab.windowId) {
-    throw new Error("tab has no windowId");
+function clamp_screenshot_quality(raw_quality) {
+  if (typeof raw_quality !== "number" || !Number.isFinite(raw_quality)) {
+    return 80;
   }
 
-  await chrome.tabs.update(resolved_tab_id, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
+  return Math.max(0, Math.min(100, Math.round(raw_quality)));
+}
 
-  const format = args?.type === "jpeg" ? "jpeg" : "png";
-  const quality = typeof args?.quality === "number" ? args.quality : 80;
+function estimate_base64_bytes(data_base64) {
+  const normalized = data_base64.replace(/=+$/u, "");
+  return Math.floor((normalized.length * 3) / 4);
+}
 
-  const data_url = await chrome.tabs.captureVisibleTab(tab.windowId, {
+async function execute_browser_take_screenshot(args, tab_id) {
+  const resolved_tab_id = assert_tab_id(tab_id);
+
+  if (!attached_tab_ids.has(resolved_tab_id)) {
+    throw new Error("browser_take_screenshot requires attached debugger tab");
+  }
+
+  const requested_type = typeof args?.type === "string" ? args.type.toLowerCase() : "jpeg";
+  const format = requested_type === "png" ? "png" : "jpeg";
+  const mime_type = format === "png" ? "image/png" : "image/jpeg";
+  const quality = clamp_screenshot_quality(args?.quality);
+  const selector = typeof args?.selector === "string" ? args.selector.trim() : "";
+  const padding =
+    typeof args?.padding === "number" && Number.isFinite(args.padding) ? Math.max(0, args.padding) : 0;
+  const has_clip =
+    typeof args?.clip_x === "number" &&
+    Number.isFinite(args.clip_x) &&
+    typeof args?.clip_y === "number" &&
+    Number.isFinite(args.clip_y) &&
+    typeof args?.clip_width === "number" &&
+    Number.isFinite(args.clip_width) &&
+    typeof args?.clip_height === "number" &&
+    Number.isFinite(args.clip_height);
+
+  let capture_mode = "viewport";
+  let capture_beyond_viewport = Boolean(args?.fullPage);
+  let final_clip = null;
+
+  if (selector.length > 0) {
+    const eval_result = await send_debugger_command(resolved_tab_id, "Runtime.evaluate", {
+      expression: `
+        (function() {
+          const element = document.querySelector(${JSON.stringify(selector)});
+          if (!element) {
+            return null;
+          }
+
+          const rect = element.getBoundingClientRect();
+          const scroll_x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+          const scroll_y = window.pageYOffset || document.documentElement.scrollTop || 0;
+          return {
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height,
+            page_x: rect.left + scroll_x,
+            page_y: rect.top + scroll_y
+          };
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const bounds = eval_result?.result?.value;
+    if (!bounds) {
+      throw new Error(`Element not found: ${selector}`);
+    }
+
+    final_clip = {
+      x: Math.max(0, Number(bounds.page_x) - padding),
+      y: Math.max(0, Number(bounds.page_y) - padding),
+      width: Number(bounds.width) + padding * 2,
+      height: Number(bounds.height) + padding * 2,
+      scale: 1,
+    };
+    capture_beyond_viewport = true;
+    capture_mode = "selector";
+  } else if (has_clip) {
+    const clip_width = Number(args.clip_width);
+    const clip_height = Number(args.clip_height);
+
+    if (clip_width <= 0 || clip_height <= 0) {
+      throw new Error("clip_width and clip_height must be greater than 0");
+    }
+
+    const clip_coordinate_system = args?.clip_coordinateSystem === "page" ? "page" : "viewport";
+    if (clip_coordinate_system === "page") {
+      const scroll_result = await send_debugger_command(resolved_tab_id, "Runtime.evaluate", {
+        expression: `({x: window.pageXOffset || document.documentElement.scrollLeft || 0, y: window.pageYOffset || document.documentElement.scrollTop || 0})`,
+        returnByValue: true,
+      });
+      const scroll = scroll_result?.result?.value ?? { x: 0, y: 0 };
+
+      final_clip = {
+        x: Number(args.clip_x) - Number(scroll.x ?? 0),
+        y: Number(args.clip_y) - Number(scroll.y ?? 0),
+        width: clip_width,
+        height: clip_height,
+        scale: 1,
+      };
+    } else {
+      final_clip = {
+        x: Number(args.clip_x),
+        y: Number(args.clip_y),
+        width: clip_width,
+        height: clip_height,
+        scale: 1,
+      };
+    }
+
+    capture_mode = "clip";
+  } else if (Boolean(args?.fullPage)) {
+    const metrics = await send_debugger_command(resolved_tab_id, "Page.getLayoutMetrics", {});
+    const content_size = metrics?.cssContentSize ?? metrics?.contentSize;
+
+    if (
+      !content_size ||
+      typeof content_size.width !== "number" ||
+      typeof content_size.height !== "number" ||
+      content_size.width <= 0 ||
+      content_size.height <= 0
+    ) {
+      throw new Error("full page screenshot could not resolve layout metrics");
+    }
+
+    final_clip = {
+      x: 0,
+      y: 0,
+      width: Math.ceil(content_size.width),
+      height: Math.ceil(content_size.height),
+      scale: 1,
+    };
+    capture_beyond_viewport = true;
+    capture_mode = "full_page";
+  }
+
+  const screenshot_params = {
     format,
-    quality,
-  });
+    quality: format === "jpeg" ? quality : undefined,
+    captureBeyondViewport: capture_beyond_viewport,
+  };
+
+  if (final_clip) {
+    screenshot_params.clip = final_clip;
+  }
+
+  const screenshot_result = await send_debugger_command(resolved_tab_id, "Page.captureScreenshot", screenshot_params);
+  const data_base64 = typeof screenshot_result?.data === "string" ? screenshot_result.data : "";
+
+  if (!data_base64) {
+    throw new Error("Page.captureScreenshot returned empty image data");
+  }
 
   return {
     tab_id: resolved_tab_id,
-    data_url,
+    data_base64,
+    mime_type,
     format,
+    bytes: estimate_base64_bytes(data_base64),
+    capture_mode,
+    full_page: capture_mode === "full_page",
+    selector: selector.length > 0 ? selector : undefined,
+    clip: final_clip
+      ? {
+          x: final_clip.x,
+          y: final_clip.y,
+          width: final_clip.width,
+          height: final_clip.height,
+        }
+      : undefined,
+    quality: format === "jpeg" ? quality : undefined,
   };
 }
 
@@ -2051,6 +2202,12 @@ async function send_debugger_command(tab_id, method, params) {
     });
   });
 }
+
+globalThis.local_mcp_extension_test_api = {
+  attach_to_tab,
+  detach_from_tab,
+  execute_browser_take_screenshot,
+};
 
 init().catch((error) => {
   log_error("fatal init error", error);

@@ -365,6 +365,37 @@ export class in_memory_bridge_transport implements bridge_transport {
       };
     }
 
+    if (tool_name === "browser_take_screenshot") {
+      const format = args.type === "png" ? "png" : "jpeg";
+      const mime_type = format === "png" ? "image/png" : "image/jpeg";
+      const data_base64 =
+        format === "png"
+          ? "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nXrkAAAAASUVORK5CYII="
+          : "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBIVFRUVFRUVFRUVFRUVFRUVFRUXFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGxAQGi0fHR0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBEQACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAB6A//xAAZEAEAAwEBAAAAAAAAAAAAAAABAAIRITH/2gAIAQEAAT8AmW0q1//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8Af//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8Af//Z";
+      const capture_mode =
+        typeof args.selector === "string" && args.selector.length > 0
+          ? "selector"
+          : typeof args.clip_x === "number" &&
+              typeof args.clip_y === "number" &&
+              typeof args.clip_width === "number" &&
+              typeof args.clip_height === "number"
+            ? "clip"
+            : args.fullPage === true
+              ? "full_page"
+              : "viewport";
+
+      return {
+        tab_id,
+        data_base64,
+        mime_type,
+        format,
+        bytes: Buffer.from(data_base64, "base64").byteLength,
+        capture_mode,
+        full_page: capture_mode === "full_page",
+        selector: typeof args.selector === "string" && args.selector.length > 0 ? args.selector : undefined,
+      };
+    }
+
     return {
       tab_id,
       ok: true,

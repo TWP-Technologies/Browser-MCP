@@ -1,5 +1,27 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-03-16
+
+### Implemented
+
+- Replaced visible-tab screenshot capture with debugger-backed screenshot capture in the co-located Chrome extension.
+- Added screenshot mode support for:
+  - viewport capture,
+  - full-page capture,
+  - selector capture with padding,
+  - coordinate clip capture.
+- Updated MCP protocol response shaping so `browser_take_screenshot` returns an MCP image content block plus structured metadata instead of only JSON text.
+- Added explicit screenshot tool schema metadata to the Bun router tool list.
+- Extended in-memory integration test stubs to return deterministic screenshot payloads.
+- Added integration coverage for attached screenshot payloads and MCP image-content compatibility.
+- Added real-browser E2E coverage for viewport/full-page/selector screenshot capture plus missing-selector failure.
+- Updated the E2E fixture harness to avoid `Bun.serve({ port: 0 })` in this Linux environment by using explicit loopback port retries.
+
+### Verification
+
+- `bun test ./tests/integration/tool_router.test.ts ./tests/integration/mcp_stdio_protocol_compat.test.ts` passed.
+- `bun test ./tests/e2e/extension_screenshot_direct.test.ts --timeout 120000` passed.
+
 ## 2026-03-04
 
 ### Implemented

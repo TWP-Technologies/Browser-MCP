@@ -20,10 +20,84 @@ let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
 let browser: Browser | undefined;
 let browser_process: ChildProcess | undefined;
-let fixture_server: Server | undefined;
 let fixture_url = "";
+const fixture_url_prefix = "data:text/html;charset=utf-8,";
 let extension_id = "";
 const user_data_dirs: string[] = [];
+const fixture_html = `
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Example Domain</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: sans-serif;
+        color: #102033;
+        background: #f5f8fc;
+      }
+
+      header {
+        padding: 24px;
+        background: #ffffff;
+        border-bottom: 1px solid #d8e1ec;
+      }
+
+      main {
+        padding: 24px;
+      }
+
+      #capture-target {
+        width: 320px;
+        padding: 24px;
+        border: 3px solid #0a5fff;
+        border-radius: 16px;
+        background: #d9ebff;
+        box-shadow: 0 16px 40px rgba(10, 95, 255, 0.18);
+      }
+
+      .spacer {
+        height: 2200px;
+        margin-top: 24px;
+        border-radius: 24px;
+        background: linear-gradient(180deg, #ffffff 0%, #dbe7f6 100%);
+      }
+
+      footer {
+        padding: 24px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Example Domain</h1>
+      <p>Test fixture page.</p>
+    </header>
+    <main>
+      <section id="capture-target">
+        <h2>Capture Target</h2>
+        <p>Selector screenshot target.</p>
+      </section>
+      <div class="spacer"></div>
+      <footer>Bottom of fixture.</footer>
+    </main>
+  </body>
+</html>
+`;
+
+interface screenshot_result {
+  data_base64?: string;
+  mime_type?: string;
+  capture_mode?: string;
+  full_page?: boolean;
+  selector?: string;
+}
 
 async function sleep(timeout_ms: number): Promise<void> {
   await new Promise((resolve_promise) => {
@@ -86,7 +160,23 @@ async function wait_for_condition(
 }
 
 function find_fixture_tab(tabs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
-  return tabs.find((tab) => String(tab.url).startsWith(fixture_url));
+  return tabs.find(
+    (tab) => String(tab.url).startsWith(fixture_url_prefix) || String(tab.title).includes("Example Domain"),
+  );
+}
+
+function parse_png_dimensions(data_base64: string): { width: number; height: number } {
+  const bytes = Buffer.from(data_base64, "base64");
+  const png_signature = "89504e470d0a1a0a";
+
+  if (bytes.length < 24 || bytes.subarray(0, 8).toString("hex") !== png_signature) {
+    throw new Error("expected PNG screenshot payload");
+  }
+
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+  };
 }
 
 async function close_connected_browser(): Promise<void> {
@@ -301,21 +391,7 @@ async function launch_extension_context(): Promise<BrowserContext | undefined> {
 }
 
 beforeAll(async () => {
-  fixture_server = Bun.serve({
-    port: 0,
-    fetch(): Response {
-      return new Response(
-        "<!doctype html><html><head><title>Example Domain</title></head><body><h1>Example Domain</h1><p>Test fixture page.</p></body></html>",
-        {
-          headers: {
-            "content-type": "text/html; charset=utf-8",
-            "cache-control": "no-store",
-          },
-        },
-      );
-    },
-  });
-  fixture_url = `http://127.0.0.1:${fixture_server.port}/`;
+  fixture_url = `${fixture_url_prefix}${encodeURIComponent(fixture_html)}`;
 
   runtime = new local_mcp_runtime({
     bridge_mode: "websocket",
@@ -367,8 +443,9 @@ afterAll(async () => {
   } finally {
     context = undefined;
     await terminate_spawned_browser_process();
-    await runtime.stop();
-    fixture_server?.stop(true);
+    if (runtime) {
+      await runtime.stop();
+    }
     await cleanup_user_data_dirs();
   }
 }, 180_000);
@@ -437,6 +514,76 @@ test("extension bridge supports attach, navigate, network capture, and pdf expor
 
     expect(typeof pdf_result.data_base64).toBe("string");
     expect((pdf_result.data_base64 ?? "").length).toBeGreaterThan(0);
+  } finally {
+    await runtime.tool_router.close_session(agent_session_id).catch(() => {
+      // Best-effort cleanup when the session was already closed by the test path.
+    });
+  }
+}, 120_000);
+
+test("extension bridge supports screenshot viewport, full-page, selector, and selector errors", async () => {
+  const { agent_session_id } = runtime.tool_router.open_session("e2e-screenshot");
+
+  try {
+    const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "list",
+    })) as {
+      tabs: Array<Record<string, unknown>>;
+    };
+
+    const target_tab = find_fixture_tab(tabs_result.tabs);
+    expect(target_tab).toBeDefined();
+
+    const target_index = target_tab?.index;
+    expect(typeof target_index).toBe("number");
+
+    await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
+      action: "attach",
+      index: target_index,
+    });
+
+    const viewport_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
+      type: "png",
+    })) as screenshot_result;
+    expect(viewport_result.mime_type).toBe("image/png");
+    expect(viewport_result.capture_mode).toBe("viewport");
+    expect(typeof viewport_result.data_base64).toBe("string");
+    const viewport_dimensions = parse_png_dimensions(String(viewport_result.data_base64));
+
+    const full_page_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
+      type: "png",
+      fullPage: true,
+    })) as screenshot_result;
+    expect(full_page_result.mime_type).toBe("image/png");
+    expect(full_page_result.capture_mode).toBe("full_page");
+    expect(full_page_result.full_page).toBe(true);
+    expect(typeof full_page_result.data_base64).toBe("string");
+    const full_page_dimensions = parse_png_dimensions(String(full_page_result.data_base64));
+    expect(full_page_dimensions.height).toBeGreaterThan(viewport_dimensions.height);
+
+    const selector_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
+      type: "png",
+      selector: "#capture-target",
+      padding: 8,
+    })) as screenshot_result;
+    expect(selector_result.mime_type).toBe("image/png");
+    expect(selector_result.capture_mode).toBe("selector");
+    expect(selector_result.selector).toBe("#capture-target");
+    expect(typeof selector_result.data_base64).toBe("string");
+    const selector_dimensions = parse_png_dimensions(String(selector_result.data_base64));
+    expect(selector_dimensions.width).toBeLessThan(viewport_dimensions.width);
+    expect(selector_dimensions.height).toBeLessThan(viewport_dimensions.height);
+
+    try {
+      await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
+        type: "png",
+        selector: "#missing-target",
+      });
+      throw new Error("expected missing selector screenshot to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(tool_error);
+      expect((error as tool_error).message).toContain("Element not found");
+    }
   } finally {
     await runtime.tool_router.close_session(agent_session_id).catch(() => {
       // Best-effort cleanup when the session was already closed by the test path.

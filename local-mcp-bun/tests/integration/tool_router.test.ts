@@ -142,6 +142,30 @@ test("tab-scoped browser_pdf_save returns encoded payload when attached", async 
   await runtime.stop();
 });
 
+test("tab-scoped browser_take_screenshot returns image payload metadata when attached", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const session_id = runtime.tool_router.open_session("agent-a").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const screenshot_result = await runtime.tool_router.call_tool(session_id, "browser_take_screenshot", {
+    type: "png",
+    fullPage: true,
+  });
+
+  expect(typeof screenshot_result.data_base64).toBe("string");
+  expect(screenshot_result.mime_type).toBe("image/png");
+  expect(Number(screenshot_result.bytes)).toBeGreaterThan(0);
+  expect(screenshot_result.capture_mode).toBe("full_page");
+  expect(screenshot_result.full_page).toBe(true);
+
+  await runtime.stop();
+});
+
 test("open_session enforces optional auth token when configured", () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",

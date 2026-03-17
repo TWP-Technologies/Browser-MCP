@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { mcp_protocol_session } from "../../src/mcp_protocol_session";
+import { local_mcp_runtime } from "../../src/runtime";
 
 interface json_rpc_response {
   jsonrpc: "2.0";
@@ -15,7 +16,6 @@ interface json_rpc_response {
 }
 
 interface running_server {
-  process: ChildProcessWithoutNullStreams;
   send_request: (id: string | number, method: string, params?: Record<string, unknown>) => Promise<json_rpc_response>;
   send_notification: (method: string, params?: Record<string, unknown>) => void;
   stop: () => Promise<void>;
@@ -31,53 +31,29 @@ if (typeof package_version !== "string" || package_version.length === 0) {
 }
 
 function start_stdio_server(): running_server {
-  const child_process = spawn("bun", ["run", "src/index.ts"], {
-    cwd: project_root,
-    env: {
-      ...process.env,
-      BRIDGE_MODE: "in_memory",
-      BRIDGE_HOST: "127.0.0.1",
-      BRIDGE_PORT: "37777",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
   });
-
-  child_process.stdout.setEncoding("utf8");
-  child_process.stderr.setEncoding("utf8");
-
-  let line_buffer = "";
   const pending_by_id = new Map<string, (response: json_rpc_response) => void>();
-
-  child_process.stdout.on("data", (chunk: string) => {
-    line_buffer += chunk;
-
-    while (true) {
-      const next_newline_index = line_buffer.indexOf("\n");
-      if (next_newline_index < 0) {
+  const session = new mcp_protocol_session({
+    runtime,
+    write_response(response) {
+      const key = String(response.id);
+      const resolver = pending_by_id.get(key);
+      if (!resolver) {
         return;
       }
 
-      const line = line_buffer.slice(0, next_newline_index).trim();
-      line_buffer = line_buffer.slice(next_newline_index + 1);
-      if (line.length === 0) {
-        continue;
-      }
-
-      const parsed = JSON.parse(line) as json_rpc_response;
-      const key = String(parsed.id);
-      const resolver = pending_by_id.get(key);
-      if (resolver) {
-        pending_by_id.delete(key);
-        resolver(parsed);
-      }
-    }
+      pending_by_id.delete(key);
+      resolver(response);
+    },
   });
 
   const send_request = (id: string | number, method: string, params: Record<string, unknown> = {}) => {
     return new Promise<json_rpc_response>((resolve_response, reject_response) => {
       const key = String(id);
-      pending_by_id.set(key, resolve_response);
-
       const timeout = setTimeout(() => {
         pending_by_id.delete(key);
         reject_response(new Error(`timed out waiting for JSON-RPC response id=${key}`));
@@ -89,35 +65,26 @@ function start_stdio_server(): running_server {
       };
 
       pending_by_id.set(key, wrapped_resolve);
-      child_process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      void session
+        .handle_line(JSON.stringify({ jsonrpc: "2.0", id, method, params }))
+        .catch((error) => {
+          clearTimeout(timeout);
+          pending_by_id.delete(key);
+          reject_response(error);
+        });
     });
   };
 
   const send_notification = (method: string, params: Record<string, unknown> = {}) => {
-    child_process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+    void session.handle_line(JSON.stringify({ jsonrpc: "2.0", method, params }));
   };
 
   const stop = async () => {
-    child_process.stdin.end();
-    await new Promise<void>((resolve_done) => {
-      if (child_process.exitCode !== null) {
-        resolve_done();
-        return;
-      }
-
-      child_process.once("exit", () => {
-        resolve_done();
-      });
-      setTimeout(() => {
-        if (child_process.exitCode === null) {
-          child_process.kill("SIGTERM");
-        }
-      }, 1500);
-    });
+    await session.close();
+    await runtime.stop();
   };
 
   const server = {
-    process: child_process,
     send_request,
     send_notification,
     stop,
@@ -195,4 +162,49 @@ test("tools/call works without explicit agent_session_id after initialize", asyn
   expect(unknown_tool_response.error).toBeUndefined();
   expect(unknown_tool_response.result?.isError).toBe(true);
   expect(Array.isArray(unknown_tool_response.result?.content)).toBe(true);
+});
+
+test("tools/call returns MCP image content for browser_take_screenshot", async () => {
+  const server = start_stdio_server();
+
+  await server.send_request("init-3", "initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: {
+      name: "tool-call-screenshot-client",
+      version: "0.0.1",
+    },
+  });
+
+  const attach_response = await server.send_request("tool-attach-1", "tools/call", {
+    name: "attach_to_tab",
+    arguments: {
+      tab_id: 101,
+    },
+  });
+
+  expect(attach_response.error).toBeUndefined();
+
+  const screenshot_response = await server.send_request("tool-screenshot-1", "tools/call", {
+    name: "browser_take_screenshot",
+    arguments: {
+      type: "png",
+      fullPage: true,
+    },
+  });
+
+  expect(screenshot_response.error).toBeUndefined();
+  expect(Array.isArray(screenshot_response.result?.content)).toBe(true);
+  expect(screenshot_response.result?.content?.[0]).toMatchObject({
+    type: "image",
+    mimeType: "image/png",
+  });
+  expect(typeof screenshot_response.result?.content?.[0]?.data).toBe("string");
+  expect((screenshot_response.result?.content?.[0]?.data as string).length).toBeGreaterThan(0);
+  expect(screenshot_response.result?.structuredContent).toMatchObject({
+    has_image: true,
+    mime_type: "image/png",
+    capture_mode: "full_page",
+    full_page: true,
+  });
 });

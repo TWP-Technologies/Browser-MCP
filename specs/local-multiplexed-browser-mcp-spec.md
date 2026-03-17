@@ -17,6 +17,7 @@
 - Required tools: `list_available_tabs`, `attach_to_tab`, `detach_from_tab`.
 - Clean-break v2 API contract for local Bun implementation (no backward-compat guarantee with blueprint tool shapes).
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
+- Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
 - Crash/restart recovery for client exits and extension restarts.
 - Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.
 - Co-located repository layout for Bun server and custom extension in a single implementation tree.
@@ -44,6 +45,7 @@
 - `list_available_tabs` tool -> Unit (response shaping), Contract/API (tool schema validation), Integration (tab inventory + lock merge).
 - `attach_to_tab` tool -> Unit (precondition checks), Integration (debugger attach success/failure), E2E (fail-fast conflict and optional wait timeout behavior).
 - `detach_from_tab` tool -> Unit (idempotent detach), Integration (detach event handling), E2E (client detach then second client attach).
+- `browser_take_screenshot` tool -> Integration (raw image payload + metadata), Contract/API (MCP image content blocks), E2E (viewport/full-page/selector capture and selector failure path).
 - Structured error model -> Unit (error code mapping), Contract/API (error payload schema), E2E (observability of error classes under failure injection).
 - Crash/restart recovery -> Integration (simulated client crash), E2E (extension restart mid-session), Regression (stale lock cleanup).
 - Local security boundary -> Unit (token config parsing), Integration (loopback binding + auth checks), Security (unauthorized local request rejection), E2E (token optional path).
@@ -190,6 +192,9 @@
   - Lock conflict error payload: `{ code: "LOCK_CONFLICT", retryable: true, details: { tab_id, owner_agent_session_id, requested_wait_timeout_ms? } }`
 - `detach_from_tab(input: { tab_id: number }) -> { tab_id: number, detached: boolean }`
   - If caller does not own lock, MUST return `SESSION_NOT_FOUND` or authorization-style ownership error.
+- `browser_take_screenshot(input: { type?: "jpeg"|"png", quality?: number, fullPage?: boolean, selector?: string, padding?: number, clip_x?: number, clip_y?: number, clip_width?: number, clip_height?: number, clip_coordinateSystem?: "viewport"|"page" })`
+  - The server MUST return an MCP `content` image block plus structured metadata describing capture mode and image MIME type.
+  - Supported capture modes MUST include `viewport`, `full_page`, `selector`, and `clip`.
 
 ### 8.5 Internal Components
 

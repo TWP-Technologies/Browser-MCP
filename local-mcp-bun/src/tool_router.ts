@@ -157,6 +157,30 @@ export class tool_router {
     ];
 
     for (const tool_name of passthrough_tools) {
+      if (tool_name === "browser_take_screenshot") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_take_screenshot. Captures viewport, full-page, selector, or clipped screenshots from the attached tab.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["jpeg", "png"] },
+              quality: { type: "number", minimum: 0, maximum: 100 },
+              fullPage: { type: "boolean" },
+              selector: { type: "string" },
+              padding: { type: "number", minimum: 0 },
+              clip_x: { type: "number" },
+              clip_y: { type: "number" },
+              clip_width: { type: "number", exclusiveMinimum: 0 },
+              clip_height: { type: "number", exclusiveMinimum: 0 },
+              clip_coordinateSystem: { type: "string", enum: ["viewport", "page"] },
+            },
+          },
+        });
+        continue;
+      }
+
       base_tools.push({
         name: tool_name,
         description: `Forwarded browser tool: ${tool_name}`,

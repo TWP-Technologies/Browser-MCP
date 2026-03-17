@@ -160,7 +160,7 @@ export class mcp_protocol_session {
         return {
           jsonrpc: "2.0",
           id: request.id ?? null,
-          result: this.to_mcp_tool_result(result),
+          result: this.to_mcp_tool_result(tool_name, result),
         };
       }
 
@@ -263,7 +263,14 @@ export class mcp_protocol_session {
     return undefined;
   }
 
-  private to_mcp_tool_result(result: Record<string, unknown>): Record<string, unknown> {
+  private to_mcp_tool_result(tool_name: string, result: Record<string, unknown>): Record<string, unknown> {
+    if (tool_name === "browser_take_screenshot") {
+      const screenshot_result = this.to_mcp_screenshot_tool_result(result);
+      if (screenshot_result) {
+        return screenshot_result;
+      }
+    }
+
     return {
       content: [
         {
@@ -273,6 +280,63 @@ export class mcp_protocol_session {
       ],
       structuredContent: result,
     };
+  }
+
+  private to_mcp_screenshot_tool_result(result: Record<string, unknown>): Record<string, unknown> | null {
+    const raw_data_base64 = typeof result.data_base64 === "string" ? result.data_base64 : this.extract_data_from_data_url(result);
+    if (!raw_data_base64) {
+      return null;
+    }
+
+    const mime_type =
+      typeof result.mime_type === "string" && result.mime_type.length > 0 ? result.mime_type : this.extract_mime_type(result);
+
+    const structured_content: Record<string, unknown> = {
+      has_image: true,
+    };
+
+    for (const key of ["tab_id", "format", "bytes", "capture_mode", "full_page", "selector", "quality", "clip"]) {
+      if (typeof result[key] !== "undefined") {
+        structured_content[key] = result[key];
+      }
+    }
+
+    structured_content.mime_type = mime_type;
+
+    return {
+      content: [
+        {
+          type: "image",
+          data: raw_data_base64,
+          mimeType: mime_type,
+        },
+        {
+          type: "text",
+          text: JSON.stringify(structured_content),
+        },
+      ],
+      structuredContent: structured_content,
+    };
+  }
+
+  private extract_data_from_data_url(result: Record<string, unknown>): string | null {
+    const data_url = typeof result.data_url === "string" ? result.data_url : "";
+    const match = /^data:([^;]+);base64,(.+)$/u.exec(data_url);
+    if (!match) {
+      return null;
+    }
+
+    return match[2] ?? null;
+  }
+
+  private extract_mime_type(result: Record<string, unknown>): string {
+    const data_url = typeof result.data_url === "string" ? result.data_url : "";
+    const match = /^data:([^;]+);base64,/u.exec(data_url);
+    if (!match || typeof match[1] !== "string" || match[1].length === 0) {
+      return "image/png";
+    }
+
+    return match[1];
   }
 
   private to_mcp_tool_error_result(error: tool_error): Record<string, unknown> {
