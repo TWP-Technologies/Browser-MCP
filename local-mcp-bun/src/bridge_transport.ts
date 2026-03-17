@@ -132,6 +132,17 @@ export class in_memory_bridge_transport implements bridge_transport {
     return JSON.parse(JSON.stringify(this.last_connections_snapshot)) as connections_snapshot;
   }
 
+  private require_tab(tab_id: number, tool_name: string): tab_snapshot {
+    const tab = this.tabs_by_id.get(tab_id);
+    if (!tab) {
+      throw new tool_error("TAB_NOT_FOUND", `${tool_name}: tab ${tab_id} not found`, false, {
+        tab_id,
+      });
+    }
+
+    return tab;
+  }
+
   public async emit_ui_admin_request_for_tests(
     action: ui_admin_request["action"],
     payload: Record<string, unknown>,
@@ -297,14 +308,15 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_snapshot", false);
       }
 
+      const tab = this.require_tab(tab_id, "browser_snapshot");
       this.reset_element_refs_for_tab(tab_id);
       const body_ref = this.register_element_ref(tab_id, "body");
       const button_ref = this.register_element_ref(tab_id, "button.primary-action");
 
       return {
         tab_id,
-        url: this.tabs_by_id.get(tab_id)?.url ?? "about:blank",
-        title: this.tabs_by_id.get(tab_id)?.title ?? "In-memory",
+        url: tab.url,
+        title: tab.title,
         snapshot: [
           {
             tag: "body",
@@ -374,6 +386,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_lookup", false);
       }
 
+      this.require_tab(tab_id, "browser_lookup");
       const text = typeof args.text === "string" ? args.text : "";
       const selector = "button.primary-action";
       const element_ref = this.register_element_ref(tab_id, selector);
@@ -399,6 +412,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_interact", false);
       }
 
+      this.require_tab(tab_id, "browser_interact");
       const actions = this.normalize_interact_actions(args);
       const results: Array<Record<string, unknown>> = [];
 
@@ -441,6 +455,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_fill_form", false);
       }
 
+      this.require_tab(tab_id, "browser_fill_form");
       const fields = Array.isArray(args.fields) ? args.fields : [];
       return {
         tab_id,
@@ -468,6 +483,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_get_element_styles", false);
       }
 
+      this.require_tab(tab_id, "browser_get_element_styles");
       const selector = this.resolve_required_selector_from_args(tab_id, args, "browser_get_element_styles");
       const property = typeof args.property === "string" ? args.property : undefined;
       return {
@@ -516,6 +532,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_take_screenshot", false);
       }
 
+      this.require_tab(tab_id, "browser_take_screenshot");
       const format = args.type === "png" ? "png" : "jpeg";
       const mime_type = format === "png" ? "image/png" : "image/jpeg";
       const resolved_selector = this.resolve_selector_from_args_optional(tab_id, args);

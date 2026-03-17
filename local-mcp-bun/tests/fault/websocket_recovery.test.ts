@@ -203,14 +203,15 @@ test("websocket bridge attach and detach do not depend on in-memory element_ref 
 
   await wait_for_condition(() => bridge.get_state() === "up");
 
-  const tabs = await bridge.list_tabs("agent-a");
-  expect(tabs[0]?.tab_id).toBe(301);
+  const attach_promise = bridge.attach_to_tab(301, "agent-a");
+  await wait_for_condition(() => extension.requests.some((request) => request.action === "attach_to_tab"));
+  await attach_promise;
 
-  await expect(bridge.attach_to_tab(301, "agent-a")).resolves.toBeUndefined();
-  await expect(bridge.detach_from_tab(301, "agent-a")).resolves.toBeUndefined();
+  const detach_promise = bridge.detach_from_tab(301, "agent-a");
+  await wait_for_condition(() => extension.requests.some((request) => request.action === "detach_from_tab"));
+  await detach_promise;
 
   expect(extension.requests.map((request) => request.action)).toEqual([
-    "list_tabs",
     "attach_to_tab",
     "detach_from_tab",
   ]);
