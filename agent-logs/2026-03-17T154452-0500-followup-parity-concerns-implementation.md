@@ -1,7 +1,7 @@
 # Follow-up parity concerns implementation
 
 - Repository: `Browser-MCP`
-- Branch/state: `trunk @ c971905`
+- Base branch state: `trunk @ c971905`
 - Scope:
   - fail-closed `element_ref` replay
   - lazy, bounded network response-body capture

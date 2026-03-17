@@ -213,6 +213,14 @@
 - PR #4 was process-noisy but technically trivial
 - PR #5 was the corrective cleanup PR and fixed most of the real post-merge issues, but it did not fully normalize visibility logic across all extension tools
 
+## Follow-up
+
+- PR #6 addresses the remaining high-confidence concerns identified in this retrospective:
+  - fail-closed `element_ref` replay
+  - lazy response-body fetching with bounded caching
+  - bounded snapshot/lookup scanning
+  - shared loopback allocation instead of fixed fixture-port probing
+
 ## Relevant recent history
 
 ```text
