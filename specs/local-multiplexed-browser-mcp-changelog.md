@@ -1,5 +1,28 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-03-17
+
+### Implemented
+
+- Closed the remaining local Blueprint browser-tool parity gaps while preserving LLM-optimized contracts:
+  - semantic `browser_snapshot` output with viewport metadata and chainable `element_ref`s,
+  - richer `browser_lookup` match metadata and CSS rule/cascade reporting in `browser_get_element_styles`,
+  - markdown-oriented `browser_extract_content`,
+  - explicit `browser_evaluate`, console, network, PDF, extension-management, and performance tool schemas in the Bun router.
+- Added remaining media/admin capabilities:
+  - screenshot `path`, `highlightClickables`, and `deviceScale`,
+  - PDF `path` persistence,
+  - network replay plus on-demand response-body inspection and JSONPath-style lookup,
+  - richer console filters, extension list/reload reporting, and structured performance metrics.
+- Added Bun-router artifact persistence for screenshots and PDFs so `path` writes occur locally in the MCP runtime rather than the extension.
+- Converted the browser roundtrip E2E fixture from a `data:` page to a loopback HTTP fixture so extension attach, executeScript, and network-capture paths are verified against a host-accessible page.
+- Updated the Blueprint parity audit and living spec to mark overlapping tools as behaviorally at parity for local scope.
+
+### Verification
+
+- `bun test ./tests/integration/tool_router.test.ts ./tests/integration/parity_remaining.test.ts ./tests/integration/mcp_stdio_protocol_compat.test.ts` passed.
+- `LOCAL_MCP_TEST_BRIDGE_PORT=37879 bun test ./tests/e2e/extension_roundtrip.test.ts --timeout 120000` passed.
+
 ## 2026-03-16
 
 ### Implemented

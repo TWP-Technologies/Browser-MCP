@@ -1,3 +1,6 @@
+import { Buffer } from "node:buffer";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { tool_error, to_tool_error } from "./errors";
 import { merge_tabs_with_locks, type bridge_transport } from "./bridge_transport";
 import { session_registry } from "./session_registry";
@@ -304,7 +307,15 @@ export class tool_router {
               selector: { type: "string" },
               element_ref: { type: "string" },
               property: { type: "string" },
-              pseudoState: { type: "string" },
+              pseudoState: {
+                anyOf: [
+                  { type: "string" },
+                  {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                ],
+              },
             },
           },
         });
@@ -325,11 +336,49 @@ export class tool_router {
               selector: { type: "string" },
               element_ref: { type: "string" },
               padding: { type: "number", minimum: 0 },
+              path: { type: "string" },
+              highlightClickables: { type: "boolean" },
+              deviceScale: { type: "number", minimum: 0 },
               clip_x: { type: "number" },
               clip_y: { type: "number" },
               clip_width: { type: "number", exclusiveMinimum: 0 },
               clip_height: { type: "number", exclusiveMinimum: 0 },
               clip_coordinateSystem: { type: "string", enum: ["viewport", "page"] },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_evaluate") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_evaluate. Executes a JavaScript expression or function in the attached tab and returns structured results.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              expression: { type: "string" },
+              function: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_console_messages") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_console_messages. Returns console entries with filtering by level, text, and URL.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              level: { type: "string", enum: ["log", "warn", "error", "info", "debug"] },
+              text: { type: "string" },
+              url: { type: "string" },
+              limit: { type: "number", minimum: 1 },
+              offset: { type: "number", minimum: 0 },
             },
           },
         });
@@ -348,6 +397,105 @@ export class tool_router {
               toSelector: { type: "string" },
               fromElementRef: { type: "string" },
               toElementRef: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_network_requests") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_network_requests. Lists, inspects, replays, or clears captured network requests for the attached tab.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              action: { type: "string", enum: ["list", "details", "replay", "clear"] },
+              urlPattern: { type: "string" },
+              method: { type: "string" },
+              status: { type: "number" },
+              resourceType: { type: "string" },
+              limit: { type: "number", minimum: 1 },
+              offset: { type: "number", minimum: 0 },
+              requestId: { type: "string" },
+              jsonPath: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_pdf_save") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_pdf_save. Exports the attached tab as a PDF and optionally persists it to a filesystem path.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              landscape: { type: "boolean" },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_list_extensions") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_list_extensions. Lists installed browser extensions with development-state metadata.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_reload_extensions") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_reload_extensions. Reloads unpacked extensions and reports skipped extensions with reasons.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              extensionName: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_performance_metrics") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_performance_metrics. Returns structured navigation, Web Vitals, and resource summary metrics for the attached tab.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_extract_content") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_extract_content. Extracts page content as markdown using auto, full, or selector/element_ref modes.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              mode: { type: "string", enum: ["auto", "full", "selector"] },
+              selector: { type: "string" },
+              element_ref: { type: "string" },
+              max_lines: { type: "number", minimum: 1 },
+              offset: { type: "number", minimum: 0 },
             },
           },
         });
@@ -904,7 +1052,10 @@ export class tool_router {
         try {
           await this.detach_from_tab(agent_session_id, { tab_id });
         } catch (error) {
-          if (!(error instanceof tool_error) || error.code !== "LOCK_NOT_OWNED") {
+          if (
+            !(error instanceof tool_error) ||
+            (error.code !== "LOCK_NOT_OWNED" && error.code !== "DETACH_FAILED")
+          ) {
             throw error;
           }
         }
@@ -1091,9 +1242,59 @@ export class tool_router {
     const result = await this.bridge_transport.call_tool(tool_name, args, agent_session_id, active_tab_id);
 
     if (result && typeof result === "object") {
-      return result as Record<string, unknown>;
+      return await this.persist_artifact_if_requested(tool_name, args, result as Record<string, unknown>);
     }
 
     return { result };
+  }
+
+  private async persist_artifact_if_requested(
+    tool_name: string,
+    args: Record<string, unknown>,
+    result: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const requested_path = typeof args.path === "string" ? args.path.trim() : "";
+    if (!requested_path) {
+      return result;
+    }
+
+    if (tool_name !== "browser_take_screenshot" && tool_name !== "browser_pdf_save") {
+      return result;
+    }
+
+    const data_base64 = typeof result.data_base64 === "string" ? result.data_base64 : "";
+    if (!data_base64) {
+      return result;
+    }
+
+    const absolute_path = resolve(requested_path);
+    const bytes = Buffer.from(data_base64, "base64");
+
+    try {
+      mkdirSync(dirname(absolute_path), { recursive: true });
+      await Bun.write(absolute_path, bytes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new tool_error("INVALID_ARGUMENT", `failed to persist ${tool_name} to ${absolute_path}`, false, {
+        path: absolute_path,
+        cause: message,
+      });
+    }
+
+    const persisted_result: Record<string, unknown> = {
+      ...result,
+      saved: true,
+      path: absolute_path,
+      saved_path: absolute_path,
+      bytes: bytes.byteLength,
+    };
+
+    delete persisted_result.data_base64;
+
+    if (tool_name === "browser_pdf_save" && typeof persisted_result.mime_type !== "string") {
+      persisted_result.mime_type = "application/pdf";
+    }
+
+    return persisted_result;
   }
 }

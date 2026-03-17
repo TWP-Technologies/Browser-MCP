@@ -295,7 +295,23 @@ export class mcp_protocol_session {
       has_image: true,
     };
 
-    for (const key of ["tab_id", "format", "bytes", "capture_mode", "full_page", "selector", "quality", "clip"]) {
+    for (const key of [
+      "tab_id",
+      "format",
+      "bytes",
+      "capture_mode",
+      "full_page",
+      "selector",
+      "element_ref",
+      "quality",
+      "clip",
+      "device_scale",
+      "highlight_clickables",
+      "highlighted_clickable_count",
+      "saved",
+      "path",
+      "saved_path",
+    ]) {
       if (typeof result[key] !== "undefined") {
         structured_content[key] = result[key];
       }

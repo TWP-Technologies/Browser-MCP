@@ -209,7 +209,7 @@ async function init() {
 }
 
 function register_debugger_event_listener() {
-  chrome.debugger.onEvent.addListener((source, method, params) => {
+  chrome.debugger.onEvent.addListener(async (source, method, params) => {
     const tab_id = source.tabId;
     if (typeof tab_id !== "number") {
       return;
@@ -227,9 +227,11 @@ function register_debugger_event_listener() {
         url: params?.request?.url ?? "",
         method: params?.request?.method ?? "GET",
         type: params?.type ?? "other",
+        initiator: params?.initiator?.type,
         status: undefined,
         response_headers: undefined,
         request_headers: params?.request?.headers ?? {},
+        request_post_data: params?.request?.postData,
         timestamp: Date.now(),
       });
       prune_network_store(requests_map, 750);
@@ -271,6 +273,22 @@ function register_debugger_event_listener() {
       existing.finished = true;
       existing.encoded_data_length = params?.encodedDataLength;
       existing.completed_at = Date.now();
+      if (attached_tab_ids.has(tab_id)) {
+        try {
+          const response_body = await chrome.debugger.sendCommand(
+            { tabId: tab_id },
+            "Network.getResponseBody",
+            { requestId: request_id },
+          );
+          if (response_body?.base64Encoded) {
+            existing.response_body_base64 = response_body.body;
+          } else {
+            existing.response_body = response_body?.body ?? "";
+          }
+        } catch (error) {
+          existing.response_body_error = error instanceof Error ? error.message : String(error);
+        }
+      }
       return;
     }
 
@@ -314,6 +332,7 @@ function register_debugger_event_listener() {
       push_console_message(tab_id, {
         level,
         text,
+        url: params?.stackTrace?.callFrames?.[0]?.url || "",
         timestamp: Date.now(),
       });
     }
@@ -1547,6 +1566,172 @@ async function force_pseudo_state(tab_id, selector, pseudo_states) {
   });
 }
 
+async function get_viewport_capture_metrics(tab_id) {
+  return await execute_in_tab(tab_id, () => {
+    const viewport = window.visualViewport;
+    return {
+      width: Math.max(1, Math.ceil(viewport?.width || window.innerWidth || document.documentElement.clientWidth || 1)),
+      height: Math.max(1, Math.ceil(viewport?.height || window.innerHeight || document.documentElement.clientHeight || 1)),
+      scroll_x: window.pageXOffset || document.documentElement.scrollLeft || 0,
+      scroll_y: window.pageYOffset || document.documentElement.scrollTop || 0,
+      device_pixel_ratio: window.devicePixelRatio || 1,
+    };
+  });
+}
+
+async function install_clickable_highlight_overlay(tab_id) {
+  return await execute_in_tab(tab_id, () => {
+    const overlay_id = `local-mcp-clickable-overlay-${Date.now()}-${Math.round(Math.random() * 100000)}`;
+    const existing = document.getElementById(overlay_id);
+    if (existing) {
+      existing.remove();
+    }
+
+    const overlay = document.createElement("div");
+    overlay.id = overlay_id;
+    overlay.setAttribute("data-local-mcp-overlay", "clickables");
+    overlay.style.position = "absolute";
+    overlay.style.left = "0";
+    overlay.style.top = "0";
+    overlay.style.width = "0";
+    overlay.style.height = "0";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "2147483647";
+
+    const clickable_selector = [
+      "a[href]",
+      "button",
+      "input:not([type=hidden])",
+      "select",
+      "textarea",
+      "summary",
+      "[role=button]",
+      "[role=link]",
+      "[onclick]",
+      "[tabindex]:not([tabindex='-1'])",
+    ].join(",");
+
+    const scroll_x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    const scroll_y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    let count = 0;
+
+    for (const element of Array.from(document.querySelectorAll(clickable_selector))) {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") {
+        continue;
+      }
+
+      const box = document.createElement("div");
+      box.style.position = "absolute";
+      box.style.left = `${Math.max(0, rect.left + scroll_x)}px`;
+      box.style.top = `${Math.max(0, rect.top + scroll_y)}px`;
+      box.style.width = `${Math.max(0, rect.width)}px`;
+      box.style.height = `${Math.max(0, rect.height)}px`;
+      box.style.boxSizing = "border-box";
+      box.style.border = "2px solid rgba(16, 185, 129, 0.95)";
+      box.style.background = "rgba(16, 185, 129, 0.14)";
+      box.style.borderRadius = "6px";
+      box.style.boxShadow = "0 0 0 1px rgba(255,255,255,0.65) inset";
+      overlay.appendChild(box);
+      count += 1;
+    }
+
+    document.body.appendChild(overlay);
+    return {
+      overlay_id,
+      count,
+    };
+  });
+}
+
+async function remove_clickable_highlight_overlay(tab_id, overlay_id) {
+  if (typeof overlay_id !== "string" || overlay_id.length === 0) {
+    return;
+  }
+
+  try {
+    await execute_in_tab(tab_id, (incoming_overlay_id) => {
+      document.getElementById(incoming_overlay_id)?.remove();
+    }, overlay_id);
+  } catch {
+    // Best-effort cleanup for navigation or tab close during screenshot flow.
+  }
+}
+
+function apply_json_path_query(value, json_path) {
+  if (typeof json_path !== "string" || json_path.length === 0 || json_path === "$") {
+    return value;
+  }
+
+  if (json_path.startsWith("$..")) {
+    const key = json_path.slice(3);
+    const matches = [];
+    const visit = (current) => {
+      if (!current || typeof current !== "object") {
+        return;
+      }
+
+      if (Array.isArray(current)) {
+        for (const entry of current) {
+          visit(entry);
+        }
+        return;
+      }
+
+      for (const [entry_key, entry_value] of Object.entries(current)) {
+        if (entry_key === key) {
+          matches.push(entry_value);
+        }
+        visit(entry_value);
+      }
+    };
+    visit(value);
+    return matches;
+  }
+
+  const tokens = [];
+  const token_pattern = /\.([A-Za-z0-9_$-]+)|\[(\d+)\]/gu;
+  const rootless = json_path.startsWith("$.") ? json_path.slice(1) : json_path;
+  let match;
+  while ((match = token_pattern.exec(rootless)) !== null) {
+    if (typeof match[1] === "string") {
+      tokens.push(match[1]);
+      continue;
+    }
+
+    if (typeof match[2] === "string") {
+      tokens.push(Number.parseInt(match[2], 10));
+    }
+  }
+
+  let current = value;
+  for (const token of tokens) {
+    if (current === null || typeof current === "undefined") {
+      return undefined;
+    }
+    current = current[token];
+  }
+
+  return current;
+}
+
+function decode_network_body_text(request) {
+  if (typeof request?.response_body === "string") {
+    return request.response_body;
+  }
+
+  if (typeof request?.response_body_base64 === "string") {
+    try {
+      return atob(request.response_body_base64);
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+}
+
 async function execute_browser_snapshot(tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   reset_element_refs_for_tab(resolved_tab_id);
@@ -1561,6 +1746,10 @@ async function execute_browser_snapshot(tab_id) {
       return raw_value.replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
     }
 
+    function normalize_text(value, max_length = 220) {
+      return String(value || "").replace(/\s+/gu, " ").trim().slice(0, max_length);
+    }
+
     function infer_role(element) {
       const explicit_role = element.getAttribute("role");
       if (explicit_role) {
@@ -1571,100 +1760,114 @@ async function execute_browser_snapshot(tab_id) {
       if (tag === "a" && element.getAttribute("href")) {
         return "link";
       }
-
       if (tag === "button") {
         return "button";
       }
-
       if (tag === "select") {
         return "combobox";
       }
-
       if (tag === "textarea") {
         return "textbox";
       }
-
       if (tag === "input") {
         const type = String(element.getAttribute("type") || "text").toLowerCase();
         if (type === "checkbox") {
           return "checkbox";
         }
-
         if (type === "radio") {
           return "radio";
         }
-
         if (type === "button" || type === "submit" || type === "reset") {
           return "button";
         }
-
         return "textbox";
       }
-
       if (/^h[1-6]$/u.test(tag)) {
         return "heading";
       }
-
       if (tag === "main") {
         return "main";
       }
-
       if (tag === "nav") {
         return "navigation";
       }
-
       if (tag === "form") {
         return "form";
       }
-
+      if (tag === "img") {
+        return "img";
+      }
       return tag;
     }
 
     function infer_name(element) {
-      const aria_label = element.getAttribute("aria-label");
-      if (aria_label && aria_label.trim()) {
-        return aria_label.trim().slice(0, 160);
+      const aria_label = normalize_text(element.getAttribute("aria-label"), 160);
+      if (aria_label) {
+        return aria_label;
       }
 
       const labelled_by = element.getAttribute("aria-labelledby");
       if (labelled_by) {
-        const label_text = labelled_by
-          .split(/\s+/u)
-          .map((id) => document.getElementById(id)?.innerText || "")
-          .join(" ")
-          .trim();
-        if (label_text) {
-          return label_text.slice(0, 160);
+        const text = normalize_text(
+          labelled_by
+            .split(/\s+/u)
+            .map((id) => document.getElementById(id)?.innerText || "")
+            .join(" "),
+          160,
+        );
+        if (text) {
+          return text;
         }
       }
 
-      const placeholder = element.getAttribute("placeholder");
-      if (placeholder && placeholder.trim()) {
-        return placeholder.trim().slice(0, 160);
+      const labels = "labels" in element && Array.isArray(Array.from(element.labels || []))
+        ? normalize_text(Array.from(element.labels || []).map((label) => label.innerText || "").join(" "), 160)
+        : "";
+      if (labels) {
+        return labels;
       }
 
-      const alt = element.getAttribute("alt");
-      if (alt && alt.trim()) {
-        return alt.trim().slice(0, 160);
-      }
-
-      const value = "value" in element ? String(element.value || "").trim() : "";
-      if (value) {
-        return value.slice(0, 160);
-      }
-
-      const text = (element.innerText || element.textContent || "").trim();
-      if (text) {
-        return text.slice(0, 160);
+      for (const candidate of [
+        element.getAttribute("placeholder"),
+        element.getAttribute("alt"),
+        element.getAttribute("title"),
+        "value" in element ? element.value : "",
+        element.innerText || element.textContent,
+      ]) {
+        const normalized = normalize_text(candidate, 160);
+        if (normalized) {
+          return normalized;
+        }
       }
 
       return "";
     }
 
+    function infer_description(element) {
+      const described_by = element.getAttribute("aria-describedby");
+      if (!described_by) {
+        return "";
+      }
+
+      return normalize_text(
+        described_by
+          .split(/\s+/u)
+          .map((id) => document.getElementById(id)?.innerText || "")
+          .join(" "),
+        180,
+      );
+    }
+
     function is_visible(element) {
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        style.opacity !== "0"
+      );
     }
 
     function selector_for(element) {
@@ -1693,7 +1896,6 @@ async function execute_browser_snapshot(tab_id) {
             segment += `:nth-of-type(${same_tag_siblings.indexOf(current) + 1})`;
           }
         }
-
         segments.unshift(segment);
         current = current.parentElement;
       }
@@ -1701,41 +1903,109 @@ async function execute_browser_snapshot(tab_id) {
       return ["body", ...segments].join(" > ");
     }
 
-    const candidates = new Set([document.body]);
+    function depth_for(element) {
+      let depth = 0;
+      let current = element.parentElement;
+      while (current && current !== document.body && depth < 12) {
+        depth += 1;
+        current = current.parentElement;
+      }
+      return depth;
+    }
+
+    function bounds_for(element) {
+      const rect = element.getBoundingClientRect();
+      const scroll_x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+      const scroll_y = window.pageYOffset || document.documentElement.scrollTop || 0;
+      return {
+        x: Math.max(0, Math.round(rect.left + scroll_x)),
+        y: Math.max(0, Math.round(rect.top + scroll_y)),
+        width: Math.max(0, Math.round(rect.width)),
+        height: Math.max(0, Math.round(rect.height)),
+      };
+    }
+
+    function state_for(element, role) {
+      const state = {};
+      if (element.hasAttribute("disabled")) {
+        state.disabled = true;
+      }
+      if (typeof element.checked === "boolean") {
+        state.checked = element.checked;
+      }
+      if (typeof element.selected === "boolean") {
+        state.selected = element.selected;
+      }
+      if (element.hasAttribute("aria-expanded")) {
+        state.expanded = element.getAttribute("aria-expanded") === "true";
+      }
+      if (element.hasAttribute("aria-pressed")) {
+        state.pressed = element.getAttribute("aria-pressed") === "true";
+      }
+      if (role === "heading") {
+        state.level = Number(element.tagName.slice(1));
+      }
+      return state;
+    }
+
+    const candidates = [];
     const max_candidates = 240;
     for (const element of document.querySelectorAll(
-      "a[href],button,input,select,textarea,summary,[role],[tabindex],label,h1,h2,h3,h4,h5,h6,main,nav,article,section,form",
+      "body,header,main,nav,footer,section,article,form,dialog,h1,h2,h3,h4,h5,h6,p,button,a[href],input,select,textarea,label,summary,[role],[tabindex],img,table,th,td,li",
     )) {
-      candidates.add(element);
-      if (candidates.size >= max_candidates) {
+      candidates.push(element);
+      if (candidates.length >= max_candidates) {
+        break;
+      }
+    }
+    const nodes = [];
+
+    for (const element of candidates) {
+      const role = infer_role(element);
+      const visible = is_visible(element);
+      const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
+      const name = infer_name(element);
+      const text = normalize_text(element.innerText || element.textContent, 220);
+      const description = infer_description(element);
+      const landmark = ["main", "navigation", "form", "dialog", "article", "section", "header", "footer"].includes(role);
+
+      if (!(visible || interactive || landmark || role === "heading" || name || text)) {
+        continue;
+      }
+
+      nodes.push({
+        tag: element.tagName.toLowerCase(),
+        role,
+        name,
+        description,
+        text,
+        visible,
+        interactive,
+        selector: selector_for(element),
+        depth: depth_for(element),
+        bounds: bounds_for(element),
+        states: state_for(element, role),
+      });
+
+      if (nodes.length >= 120) {
         break;
       }
     }
 
-    const nodes = Array.from(candidates)
-      .map((element) => {
-        const role = infer_role(element);
-        const visible = is_visible(element);
-        const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
-        return {
-          tag: element.tagName.toLowerCase(),
-          role,
-          name: infer_name(element),
-          text: (element.innerText || element.textContent || "").trim().slice(0, 200),
-          visible,
-          interactive,
-          selector: selector_for(element),
-          disabled: element.hasAttribute("disabled"),
-        };
-      })
-      .filter((node) => node.visible || node.interactive || node.tag === "body")
-      .sort((left, right) => Number(right.interactive) - Number(left.interactive) || Number(right.visible) - Number(left.visible))
-      .slice(0, 80);
+    const viewport = {
+      width: Math.max(1, Math.ceil(window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 1)),
+      height: Math.max(1, Math.ceil(window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 1)),
+      device_pixel_ratio: window.devicePixelRatio || 1,
+      scroll_x: window.pageXOffset || document.documentElement.scrollLeft || 0,
+      scroll_y: window.pageYOffset || document.documentElement.scrollTop || 0,
+    };
 
     return {
       url: location.href,
       title: document.title,
+      viewport,
       nodes,
+      truncated: candidates.length > nodes.length,
     };
   });
 
@@ -1755,9 +2025,10 @@ async function execute_browser_snapshot(tab_id) {
     tab_id: resolved_tab_id,
     url: page_snapshot?.url,
     title: page_snapshot?.title,
+    viewport: page_snapshot?.viewport,
     snapshot,
     total_nodes: snapshot.length,
-    truncated: snapshot.length >= 80,
+    truncated: Boolean(page_snapshot?.truncated),
   };
 }
 
@@ -1785,6 +2056,13 @@ async function execute_browser_take_screenshot(args, tab_id) {
   const format = requested_type === "png" ? "png" : "jpeg";
   const mime_type = format === "png" ? "image/png" : "image/jpeg";
   const quality = clamp_screenshot_quality(args?.quality);
+  const device_scale =
+    typeof args?.deviceScale === "number" && Number.isFinite(args.deviceScale)
+      ? args.deviceScale === 0
+        ? 0
+        : Math.max(0.1, args.deviceScale)
+      : 1;
+  const highlight_clickables = args?.highlightClickables === true;
   const resolved_target = await resolve_selector_target(args, resolved_tab_id);
   const selector = resolved_target.selector;
   const padding =
@@ -1802,6 +2080,13 @@ async function execute_browser_take_screenshot(args, tab_id) {
   let capture_mode = "viewport";
   let capture_beyond_viewport = Boolean(args?.fullPage);
   let final_clip = null;
+  let highlighted_clickable_count = 0;
+  let highlight_overlay_id = "";
+  const viewport_metrics = await get_viewport_capture_metrics(resolved_tab_id);
+  const effective_scale =
+    device_scale === 0
+      ? Math.max(1, Number(viewport_metrics?.device_pixel_ratio || 1))
+      : device_scale;
 
   if (selector.length > 0) {
     const eval_result = await send_debugger_command(resolved_tab_id, "Runtime.evaluate", {
@@ -1838,7 +2123,7 @@ async function execute_browser_take_screenshot(args, tab_id) {
       y: Math.max(0, Number(bounds.page_y) - padding),
       width: Number(bounds.width) + padding * 2,
       height: Number(bounds.height) + padding * 2,
-      scale: 1,
+      scale: effective_scale,
     };
     capture_beyond_viewport = true;
     capture_mode = "selector";
@@ -1863,7 +2148,7 @@ async function execute_browser_take_screenshot(args, tab_id) {
         y: Number(args.clip_y) - Number(scroll.y ?? 0),
         width: clip_width,
         height: clip_height,
-        scale: 1,
+        scale: effective_scale,
       };
     } else {
       final_clip = {
@@ -1871,7 +2156,7 @@ async function execute_browser_take_screenshot(args, tab_id) {
         y: Number(args.clip_y),
         width: clip_width,
         height: clip_height,
-        scale: 1,
+        scale: effective_scale,
       };
     }
 
@@ -1895,10 +2180,18 @@ async function execute_browser_take_screenshot(args, tab_id) {
       y: 0,
       width: Math.ceil(content_size.width),
       height: Math.ceil(content_size.height),
-      scale: 1,
+      scale: effective_scale,
     };
     capture_beyond_viewport = true;
     capture_mode = "full_page";
+  } else {
+    final_clip = {
+      x: Number(viewport_metrics?.scroll_x || 0),
+      y: Number(viewport_metrics?.scroll_y || 0),
+      width: Number(viewport_metrics?.width || 1),
+      height: Number(viewport_metrics?.height || 1),
+      scale: effective_scale,
+    };
   }
 
   const screenshot_params = {
@@ -1911,33 +2204,47 @@ async function execute_browser_take_screenshot(args, tab_id) {
     screenshot_params.clip = final_clip;
   }
 
-  const screenshot_result = await send_debugger_command(resolved_tab_id, "Page.captureScreenshot", screenshot_params);
-  const data_base64 = typeof screenshot_result?.data === "string" ? screenshot_result.data : "";
-
-  if (!data_base64) {
-    throw new Error("Page.captureScreenshot returned empty image data");
+  if (highlight_clickables) {
+    const overlay = await install_clickable_highlight_overlay(resolved_tab_id);
+    highlight_overlay_id = overlay?.overlay_id ?? "";
+    highlighted_clickable_count = Number(overlay?.count || 0);
   }
+  try {
+    const screenshot_result = await send_debugger_command(resolved_tab_id, "Page.captureScreenshot", screenshot_params);
+    const data_base64 = typeof screenshot_result?.data === "string" ? screenshot_result.data : "";
 
-  return {
-    tab_id: resolved_tab_id,
-    data_base64,
-    mime_type,
-    format,
-    bytes: estimate_base64_bytes(data_base64),
-    capture_mode,
-    full_page: capture_mode === "full_page",
-    selector: selector.length > 0 ? selector : undefined,
-    element_ref: resolved_target.element_ref,
-    clip: final_clip
-      ? {
-          x: final_clip.x,
-          y: final_clip.y,
-          width: final_clip.width,
-          height: final_clip.height,
-        }
-      : undefined,
-    quality: format === "jpeg" ? quality : undefined,
-  };
+    if (!data_base64) {
+      throw new Error("Page.captureScreenshot returned empty image data");
+    }
+
+    return {
+      tab_id: resolved_tab_id,
+      data_base64,
+      mime_type,
+      format,
+      bytes: estimate_base64_bytes(data_base64),
+      capture_mode,
+      full_page: capture_mode === "full_page",
+      selector: selector.length > 0 ? selector : undefined,
+      element_ref: resolved_target.element_ref,
+      device_scale: effective_scale,
+      highlight_clickables,
+      highlighted_clickable_count,
+      clip: final_clip
+        ? {
+            x: final_clip.x,
+            y: final_clip.y,
+            width: final_clip.width,
+            height: final_clip.height,
+          }
+        : undefined,
+      quality: format === "jpeg" ? quality : undefined,
+    };
+  } finally {
+    if (highlight_overlay_id) {
+      await remove_clickable_highlight_overlay(resolved_tab_id, highlight_overlay_id);
+    }
+  }
 }
 
 async function execute_browser_evaluate(args, tab_id) {
@@ -1950,7 +2257,7 @@ async function execute_browser_evaluate(args, tab_id) {
         : "";
 
   if (!expression) {
-    throw new Error("browser_evaluate requires expression");
+    throw new Error("browser_evaluate requires expression or function");
   }
 
   if (!attached_tab_ids.has(resolved_tab_id)) {
@@ -2421,6 +2728,10 @@ async function execute_browser_lookup(args, tab_id) {
     const query = incoming_text.toLowerCase();
     const output = [];
 
+    function normalize_text(value, max_length = 220) {
+      return String(value || "").replace(/\s+/gu, " ").trim().slice(0, max_length);
+    }
+
     function selector_for(element) {
       if (element.id) {
         if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
@@ -2477,31 +2788,66 @@ async function execute_browser_lookup(args, tab_id) {
       if (tag === "a" && element.getAttribute("href")) {
         return "link";
       }
-
       if (tag === "button") {
         return "button";
       }
-
+      if (tag === "input") {
+        return "textbox";
+      }
+      if (/^h[1-6]$/u.test(tag)) {
+        return "heading";
+      }
       return tag;
     }
 
+    function bounds_for(element) {
+      const rect = element.getBoundingClientRect();
+      const scroll_x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+      const scroll_y = window.pageYOffset || document.documentElement.scrollTop || 0;
+      return {
+        x: Math.max(0, Math.round(rect.left + scroll_x)),
+        y: Math.max(0, Math.round(rect.top + scroll_y)),
+        width: Math.max(0, Math.round(rect.width)),
+        height: Math.max(0, Math.round(rect.height)),
+      };
+    }
+
+    function is_visible(element) {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    }
+
     for (const element of Array.from(document.querySelectorAll("body *"))) {
-      const text_value = (element.innerText || "").trim();
-      if (!text_value) {
+      const text_value = normalize_text(element.innerText || element.textContent);
+      const name = normalize_text(
+        element.getAttribute("aria-label") ||
+          element.getAttribute("placeholder") ||
+          element.getAttribute("title") ||
+          ("value" in element ? element.value : "") ||
+          text_value,
+        160,
+      );
+      const haystack = [text_value, name].join(" ").toLowerCase();
+      if (!haystack.includes(query)) {
         continue;
       }
 
-      if (!text_value.toLowerCase().includes(query)) {
-        continue;
-      }
+      const role = infer_role(element);
+      const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
+      const visible = is_visible(element);
+      const score = text_value.toLowerCase() === query ? 1 : text_value.toLowerCase().startsWith(query) ? 0.9 : 0.75;
 
       output.push({
         selector: selector_for(element),
-        text: text_value.slice(0, 200),
+        text: text_value,
         tag: element.tagName.toLowerCase(),
-        role: infer_role(element),
-        name: text_value.slice(0, 120),
-        visible: true,
+        role,
+        name,
+        visible,
+        interactive,
+        score,
+        bounds: bounds_for(element),
       });
 
       if (output.length >= incoming_limit) {
@@ -2509,7 +2855,7 @@ async function execute_browser_lookup(args, tab_id) {
       }
     }
 
-    return output;
+    return output.sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
   }, text, limit);
 
   return {
@@ -2579,35 +2925,203 @@ async function execute_browser_extract_content(args, tab_id) {
   const max_lines = typeof args?.max_lines === "number" ? Math.max(1, args.max_lines) : 500;
   const offset = typeof args?.offset === "number" ? Math.max(0, args.offset) : 0;
 
-  const text = await execute_in_tab(resolved_tab_id, (incoming_mode, incoming_selector) => {
-    let target = document.body;
+  const extraction = await execute_in_tab(resolved_tab_id, (incoming_mode, incoming_selector) => {
+    function normalize_text(value) {
+      return String(value || "").replace(/\s+/gu, " ").trim();
+    }
 
-    if (incoming_mode === "selector") {
-      const found = document.querySelector(incoming_selector);
-      if (found) {
-        target = found;
+    function select_target() {
+      if (incoming_mode === "selector") {
+        return document.querySelector(incoming_selector);
+      }
+
+      if (incoming_mode === "full") {
+        return document.body || document.documentElement;
+      }
+
+      const candidates = [
+        document.querySelector("article"),
+        document.querySelector("main"),
+        document.querySelector("[role='main']"),
+        document.querySelector("#content"),
+        document.querySelector(".content"),
+        document.body,
+      ].filter(Boolean);
+
+      return candidates.sort((left, right) => (right?.innerText?.length || 0) - (left?.innerText?.length || 0))[0];
+    }
+
+    function inline_text(node) {
+      if (!node) {
+        return "";
+      }
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        return normalize_text(node.textContent);
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return "";
+      }
+
+      const element = node;
+      const tag = element.tagName.toLowerCase();
+      if (tag === "a" && element.getAttribute("href")) {
+        const text = normalize_text(element.innerText || element.textContent);
+        const href = element.getAttribute("href");
+        return text ? `[${text}](${href})` : href || "";
+      }
+
+      if (tag === "code") {
+        return `\`${normalize_text(element.textContent)}\``;
+      }
+
+      return Array.from(element.childNodes).map((child) => inline_text(child)).join(" ").trim();
+    }
+
+    function push_block(lines, value) {
+      const normalized = normalize_text(value);
+      if (!normalized) {
+        return;
+      }
+
+      const last = lines[lines.length - 1];
+      if (last === "" && normalized === "") {
+        return;
+      }
+
+      lines.push(normalized);
+    }
+
+    function serialize(node, lines, list_depth = 0) {
+      if (!node) {
+        return;
+      }
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        push_block(lines, node.textContent);
+        return;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return;
+      }
+
+      const element = node;
+      const tag = element.tagName.toLowerCase();
+      if (["script", "style", "noscript"].includes(tag)) {
+        return;
+      }
+
+      if (/^h[1-6]$/u.test(tag)) {
+        const level = Number(tag.slice(1));
+        push_block(lines, `${"#".repeat(level)} ${normalize_text(element.innerText || element.textContent)}`);
+        lines.push("");
+        return;
+      }
+
+      if (tag === "p") {
+        push_block(lines, inline_text(element));
+        lines.push("");
+        return;
+      }
+
+      if (tag === "ul" || tag === "ol") {
+        const items = Array.from(element.children).filter((child) => child.tagName?.toLowerCase() === "li");
+        items.forEach((item, index) => {
+          const prefix = tag === "ol" ? `${index + 1}.` : "-";
+          push_block(lines, `${"  ".repeat(list_depth)}${prefix} ${inline_text(item)}`);
+        });
+        lines.push("");
+        return;
+      }
+
+      if (tag === "pre") {
+        const code = (element.textContent || "").trim();
+        if (code) {
+          lines.push("```");
+          lines.push(code);
+          lines.push("```");
+          lines.push("");
+        }
+        return;
+      }
+
+      if (tag === "table") {
+        const rows = Array.from(element.querySelectorAll("tr"));
+        rows.forEach((row, row_index) => {
+          const cells = Array.from(row.querySelectorAll("th,td")).map((cell) => normalize_text(cell.innerText || cell.textContent));
+          if (cells.length === 0) {
+            return;
+          }
+          lines.push(`| ${cells.join(" | ")} |`);
+          if (row_index === 0) {
+            lines.push(`| ${cells.map(() => "---").join(" | ")} |`);
+          }
+        });
+        lines.push("");
+        return;
+      }
+
+      if (["section", "article", "main", "header", "footer", "div"].includes(tag) && normalize_text(element.innerText || "").length) {
+        for (const child of Array.from(element.childNodes)) {
+          serialize(child, lines, list_depth);
+        }
+        return;
+      }
+
+      const inline = inline_text(element);
+      if (inline) {
+        push_block(lines, inline);
       }
     }
 
-    if (incoming_mode === "full") {
-      target = document.documentElement;
+    const target = select_target();
+    if (!target) {
+      return {
+        found: false,
+        selector: incoming_selector,
+        markdown: "",
+      };
     }
 
-    return (target?.innerText || "").trim();
+    const lines = [];
+    serialize(target, lines, 0);
+    const collapsed_lines = [];
+    for (const line of lines) {
+      if (line === "" && collapsed_lines[collapsed_lines.length - 1] === "") {
+        continue;
+      }
+      collapsed_lines.push(line);
+    }
+
+    return {
+      found: true,
+      selector:
+        target.id ? `#${target.id}` : incoming_mode === "selector" ? incoming_selector : target.tagName.toLowerCase(),
+      markdown: collapsed_lines.join("\n").trim(),
+    };
   }, mode, selector);
 
-  const lines = text.split("\n").map((line) => line.trim());
+  if (mode === "selector" && !extraction?.found) {
+    throw new Error(`selector not found: ${selector}`);
+  }
+
+  const lines = String(extraction?.markdown || "")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/u, ""));
   const sliced_lines = lines.slice(offset, offset + max_lines);
 
   return {
     tab_id: resolved_tab_id,
     mode,
-    selector,
+    selector: extraction?.selector || selector,
     element_ref: resolved_target.element_ref,
     offset,
     max_lines,
     content: sliced_lines.join("\n"),
     total_lines: lines.length,
+    truncated: offset + max_lines < lines.length,
   };
 }
 
@@ -2616,44 +3130,67 @@ async function execute_browser_get_element_styles(args, tab_id) {
   const resolved_target = await resolve_required_selector_target(args, resolved_tab_id, "browser_get_element_styles");
   const selector = resolved_target.selector;
   const property = typeof args?.property === "string" ? args.property : undefined;
-  const pseudo_state = typeof args?.pseudoState === "string" ? args.pseudoState : "";
+  const pseudo_states = Array.isArray(args?.pseudoState)
+    ? args.pseudoState.filter((value) => typeof value === "string")
+    : typeof args?.pseudoState === "string"
+      ? [args.pseudoState]
+      : [];
 
-  if (pseudo_state) {
-    await force_pseudo_state(resolved_tab_id, selector, pseudo_state);
+  if (Array.isArray(args?.pseudoState) || pseudo_states.length > 0) {
+    await force_pseudo_state(resolved_tab_id, selector, pseudo_states);
   }
 
-  let styles;
+  let computed_style = {};
+  let inline_style = {};
+  let matched_rules = [];
   try {
-    styles = await execute_in_tab(resolved_tab_id, (incoming_selector, incoming_property) => {
-      const element = document.querySelector(incoming_selector);
-      if (!element) {
-        return { found: false };
-      }
+    await send_debugger_command(resolved_tab_id, "CSS.enable", {});
+    const node_id = await resolve_dom_node_id(resolved_tab_id, selector);
+    const matched_styles = await send_debugger_command(resolved_tab_id, "CSS.getMatchedStylesForNode", {
+      nodeId: node_id,
+    });
+    const computed_styles = await send_debugger_command(resolved_tab_id, "CSS.getComputedStyleForNode", {
+      nodeId: node_id,
+    });
 
-      const computed = getComputedStyle(element);
-      if (incoming_property) {
-        return {
-          found: true,
-          selector: incoming_selector,
-          property: incoming_property,
-          value: computed.getPropertyValue(incoming_property),
-        };
+    function format_css_properties(properties) {
+      const entries = Array.isArray(properties) ? properties : [];
+      const mapped = {};
+      for (const entry of entries) {
+        const name = typeof entry?.name === "string" ? entry.name : "";
+        if (!name) {
+          continue;
+        }
+        if (property && name !== property) {
+          continue;
+        }
+        mapped[name] = entry.value ?? "";
       }
+      return mapped;
+    }
 
-      const keys = ["display", "visibility", "position", "color", "background-color", "font-size"];
-      const picked = {};
-      for (const key of keys) {
-        picked[key] = computed.getPropertyValue(key);
-      }
+    computed_style = format_css_properties(computed_styles?.computedStyle);
+    inline_style = format_css_properties(matched_styles?.inlineStyle?.cssProperties);
+    matched_rules = Array.isArray(matched_styles?.matchedCSSRules)
+      ? matched_styles.matchedCSSRules
+          .map((entry) => {
+            const rule_selector = entry?.rule?.selectorList?.text;
+            const properties = format_css_properties(entry?.rule?.style?.cssProperties);
+            if (Object.keys(properties).length === 0 && property) {
+              return null;
+            }
 
-      return {
-        found: true,
-        selector: incoming_selector,
-        styles: picked,
-      };
-    }, selector, property);
+            return {
+              selector: rule_selector || "",
+              origin: entry?.rule?.origin,
+              style_sheet_id: entry?.rule?.styleSheetId,
+              properties,
+            };
+          })
+          .filter(Boolean)
+      : [];
   } finally {
-    if (pseudo_state) {
+    if (Array.isArray(args?.pseudoState) || pseudo_states.length > 0) {
       await force_pseudo_state(resolved_tab_id, selector, []);
     }
   }
@@ -2662,8 +3199,13 @@ async function execute_browser_get_element_styles(args, tab_id) {
     tab_id: resolved_tab_id,
     selector,
     element_ref: resolved_target.element_ref,
-    pseudo_state: pseudo_state || undefined,
-    ...styles,
+    found: true,
+    pseudo_states: pseudo_states.length ? pseudo_states : undefined,
+    property,
+    value: property ? computed_style[property] ?? "" : undefined,
+    computed_style: property ? undefined : computed_style,
+    inline_style,
+    matched_rules,
   };
 }
 
@@ -2687,17 +3229,73 @@ async function execute_browser_network_requests(args, tab_id) {
     }
 
     const details = requests_map.get(request_id);
+    if (details && !decode_network_body_text(details) && attached_tab_ids.has(resolved_tab_id)) {
+      try {
+        const response_body = await send_debugger_command(resolved_tab_id, "Network.getResponseBody", {
+          requestId: request_id,
+        });
+        if (response_body?.base64Encoded) {
+          details.response_body_base64 = response_body.body;
+        } else {
+          details.response_body = response_body?.body ?? "";
+        }
+      } catch (error) {
+        details.response_body_error = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const response_body_text = decode_network_body_text(details);
+    let json_path_result;
+    let json_path_error;
+    if (typeof args?.jsonPath === "string" && args.jsonPath.length > 0 && response_body_text) {
+      try {
+        json_path_result = apply_json_path_query(JSON.parse(response_body_text), args.jsonPath);
+      } catch (error) {
+        json_path_error = error instanceof Error ? error.message : String(error);
+      }
+    }
+
     return {
       tab_id: resolved_tab_id,
       request: details ?? null,
+      response_body_text,
+      json_path_result,
+      json_path_error,
     };
   }
 
   if (action === "replay") {
+    const request_id = args?.requestId;
+    if (typeof request_id !== "string" || request_id.length === 0) {
+      throw new Error("browser_network_requests action=replay requires requestId");
+    }
+
+    const request = requests_map.get(request_id);
+    if (!request) {
+      throw new Error(`request not found: ${request_id}`);
+    }
+
+    const headers = { ...(request.request_headers || {}) };
+    delete headers.host;
+    delete headers["content-length"];
+    delete headers["Content-Length"];
+
+    const response = await fetch(request.url, {
+      method: request.method || "GET",
+      headers,
+      body: typeof request.request_post_data === "string" ? request.request_post_data : undefined,
+    });
+    const response_body_excerpt = await response.text();
+
     return {
       tab_id: resolved_tab_id,
-      replayed: false,
-      notice: "replay is not implemented in extension v1",
+      replayed: true,
+      request_id,
+      ok: response.ok,
+      status: response.status,
+      response_headers: Object.fromEntries(response.headers.entries()),
+      response_body_excerpt: response_body_excerpt.slice(0, 4000),
+      response_body_truncated: response_body_excerpt.length > 4000,
     };
   }
 
@@ -2706,6 +3304,7 @@ async function execute_browser_network_requests(args, tab_id) {
   const method_filter = typeof args?.method === "string" ? args.method.toUpperCase() : undefined;
   const status_filter = typeof args?.status === "number" ? args.status : undefined;
   const url_pattern = typeof args?.urlPattern === "string" ? args.urlPattern.toLowerCase() : undefined;
+  const resource_type = typeof args?.resourceType === "string" ? args.resourceType.toLowerCase() : undefined;
 
   let rows = Array.from(requests_map.values());
   rows.sort((left, right) => Number(right.timestamp ?? 0) - Number(left.timestamp ?? 0));
@@ -2722,9 +3321,15 @@ async function execute_browser_network_requests(args, tab_id) {
     rows = rows.filter((row) => String(row.url || "").toLowerCase().includes(url_pattern));
   }
 
+  if (resource_type) {
+    rows = rows.filter((row) => String(row.type || "").toLowerCase() === resource_type);
+  }
+
   return {
     tab_id: resolved_tab_id,
     total: rows.length,
+    offset,
+    limit,
     requests: rows.slice(offset, offset + limit),
   };
 }
@@ -2750,6 +3355,7 @@ async function execute_browser_pdf_save(args, tab_id) {
     tab_id: resolved_tab_id,
     data_base64: data,
     bytes: Math.floor((data.length * 3) / 4),
+    mime_type: "application/pdf",
   };
 }
 
@@ -2757,11 +3363,26 @@ async function execute_browser_console_messages(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   const limit = typeof args?.limit === "number" ? Math.max(1, args.limit) : 50;
   const offset = typeof args?.offset === "number" ? Math.max(0, args.offset) : 0;
+  const level = typeof args?.level === "string" ? args.level.toLowerCase() : undefined;
+  const text_filter = typeof args?.text === "string" ? args.text.toLowerCase() : undefined;
+  const url_filter = typeof args?.url === "string" ? args.url.toLowerCase() : undefined;
 
-  const messages = console_messages_by_tab.get(resolved_tab_id) || [];
+  let messages = console_messages_by_tab.get(resolved_tab_id) || [];
+  if (level) {
+    messages = messages.filter((message) => String(message.level || "").toLowerCase() === level);
+  }
+  if (text_filter) {
+    messages = messages.filter((message) => String(message.text || "").toLowerCase().includes(text_filter));
+  }
+  if (url_filter) {
+    messages = messages.filter((message) => String(message.url || "").toLowerCase().includes(url_filter));
+  }
 
   return {
     tab_id: resolved_tab_id,
+    total: messages.length,
+    offset,
+    limit,
     messages: messages.slice(offset, offset + limit),
   };
 }
@@ -2842,8 +3463,13 @@ async function execute_browser_list_extensions() {
       .map((extension) => ({
         id: extension.id,
         name: extension.name,
+        short_name: extension.shortName,
+        description: extension.description,
+        version: extension.version,
         enabled: extension.enabled,
         install_type: extension.installType,
+        may_disable: extension.mayDisable,
+        type: extension.type,
       })),
   };
 }
@@ -2854,9 +3480,10 @@ async function execute_browser_reload_extensions(args) {
   const extensions = await chrome.management.getAll();
 
   const reloaded = [];
+  const skipped = [];
 
   for (const extension of extensions) {
-    if (extension.type !== "extension" || extension.installType !== "development" || !extension.enabled) {
+    if (extension.type !== "extension") {
       continue;
     }
 
@@ -2865,36 +3492,88 @@ async function execute_browser_reload_extensions(args) {
     }
 
     if (extension.id === current_extension_id) {
+      skipped.push({
+        name: extension.name,
+        id: extension.id,
+        reason: "current_extension",
+      });
+      continue;
+    }
+
+    if (extension.installType !== "development") {
+      skipped.push({
+        name: extension.name,
+        id: extension.id,
+        reason: "not_unpacked",
+      });
+      continue;
+    }
+
+    if (!extension.enabled) {
+      skipped.push({
+        name: extension.name,
+        id: extension.id,
+        reason: "disabled",
+      });
       continue;
     }
 
     await chrome.management.setEnabled(extension.id, false);
     await chrome.management.setEnabled(extension.id, true);
-    reloaded.push(extension.name);
+    reloaded.push({
+      name: extension.name,
+      id: extension.id,
+    });
   }
 
   return {
+    requested_extension_name: extension_name,
     reloaded,
+    skipped,
   };
 }
 
 async function execute_browser_performance_metrics(tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   const metrics = await execute_in_tab(resolved_tab_id, () => {
-    const timing = performance.timing;
-    const navigation_start = timing.navigationStart;
+    const navigation_entry = performance.getEntriesByType("navigation")[0];
+    const paint_entries = performance.getEntriesByType("paint");
+    const resource_entries = performance.getEntriesByType("resource");
+    const fcp_entry = paint_entries.find((entry) => entry.name === "first-contentful-paint");
+    const lcp_entries = performance.getEntriesByType("largest-contentful-paint");
+    const cls_entries = performance.getEntriesByType("layout-shift");
+    const cls = cls_entries.reduce((sum, entry) => sum + (entry.hadRecentInput ? 0 : Number(entry.value || 0)), 0);
 
     return {
-      navigation_start,
-      dom_content_loaded: timing.domContentLoadedEventEnd - navigation_start,
-      load_event_end: timing.loadEventEnd - navigation_start,
-      response_start: timing.responseStart - navigation_start,
-      response_end: timing.responseEnd - navigation_start,
+      navigation: {
+        dom_content_loaded: Math.round(navigation_entry?.domContentLoadedEventEnd || 0),
+        load_event_end: Math.round(navigation_entry?.loadEventEnd || 0),
+        dom_interactive: Math.round(navigation_entry?.domInteractive || 0),
+        response_start: Math.round(navigation_entry?.responseStart || 0),
+        response_end: Math.round(navigation_entry?.responseEnd || 0),
+      },
+      web_vitals: {
+        ttfb: Math.round(navigation_entry?.responseStart || 0),
+        fcp: Math.round(fcp_entry?.startTime || 0),
+        lcp: Math.round(lcp_entries[lcp_entries.length - 1]?.startTime || 0),
+        cls: Number(cls.toFixed(4)),
+      },
+      resources: {
+        count: resource_entries.length,
+        transfer_size: resource_entries.reduce((sum, entry) => sum + Number(entry.transferSize || 0), 0),
+      },
+      viewport: {
+        width: Math.max(1, Math.round(window.innerWidth || document.documentElement.clientWidth || 1)),
+        height: Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || 1)),
+        device_pixel_ratio: window.devicePixelRatio || 1,
+      },
     };
   });
 
   return {
     tab_id: resolved_tab_id,
+    url: await execute_in_tab(resolved_tab_id, () => location.href),
+    title: await execute_in_tab(resolved_tab_id, () => document.title),
     metrics,
   };
 }

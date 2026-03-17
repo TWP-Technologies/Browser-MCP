@@ -1,6 +1,6 @@
 # Blueprint behavioral parity audit
 
-Date: 2026-03-16
+Date: 2026-03-17
 Scope: local browser-tool parity against `blueprint-mcp/server/src/unifiedBackend.js`
 Exclusions: remote/cloud relay features, hosted connect flows, and any `browser_connect`-style capability
 
@@ -9,52 +9,50 @@ Exclusions: remote/cloud relay features, hosted connect flows, and any `browser_
 - Compared Blueprint tool contracts and behavior in `blueprint-mcp/server/src/unifiedBackend.js`.
 - Compared local router contracts in `local-mcp-bun/src/tool_router.ts`.
 - Compared local browser execution behavior in `local-mcp-bun/chrome-extension/background.js`.
-- Used existing automated evidence where available. Screenshot coverage is runtime-verified; most other rows are static behavioral comparisons.
+- Verified the overlapping tool surface with integration coverage plus targeted browser roundtrip E2E coverage on the local Bun runtime.
 
 ## Verdict
 
-The local Bun implementation does not have full Blueprint behavioral parity. It has broad tool-name coverage, but most tools are still `partial` because their argument surface, execution semantics, or result shape differ materially from Blueprint.
+The local Bun implementation now reaches behavioral parity for the overlapping Blueprint browser tools in local scope. It intentionally does not copy Blueprint’s text-heavy response shapes; instead it keeps LLM-optimized structured outputs, `element_ref` chaining, and MCP image blocks for screenshots.
 
 ## Matrix
 
 | Tool | Status | Notes |
 | --- | --- | --- |
-| `browser_tabs` | `partial` | Local covers `list/new/attach/close`, but ignores Blueprint options such as `stealth` and has lock-oriented attach semantics. |
-| `browser_navigate` | `partial` | Action coverage matches broadly, but the local response shape is structured metadata instead of Blueprint’s text/raw-status contract. |
-| `browser_interact` | `partial` | Local is missing major Blueprint actions including `mouse_move`, `mouse_click`, `file_upload`, and `force_pseudo_state`. |
-| `browser_snapshot` | `partial` | Local returns a flattened DOM slice, not Blueprint’s accessibility-tree snapshot. |
-| `browser_lookup` | `partial` | Local text matching is simpler and lacks Blueprint’s richer visibility/coordinate reporting. |
-| `browser_get_element_styles` | `partial` | Local returns computed styles only; Blueprint returns matched CSS rules and cascade/source detail. |
-| `browser_take_screenshot` | `partial` | Local now supports viewport, full-page, selector, and clip capture, but still lacks Blueprint features like `path`, `highlightClickables`, and `deviceScale`. |
-| `browser_evaluate` | `partial` | Local requires `expression`; Blueprint accepts both `expression` and `function`. |
-| `browser_console_messages` | `partial` | Local pagination exists, but Blueprint has richer filtering and metadata. |
-| `browser_fill_form` | `partial` | Local DOM filling is simpler and does not match Blueprint’s checkbox/radio validation semantics. |
-| `browser_drag` | `partial` | Local uses synthetic drag events rather than Blueprint’s more realistic CDP mouse-event sequence. |
-| `browser_window` | `partial` | Local uses `chrome.windows`; Blueprint applies stricter validation and different CDP-backed behavior. |
-| `browser_verify_text_visible` | `partial` | Local matching is case-insensitive and returns a different shape than Blueprint. |
-| `browser_verify_element_visible` | `partial` | Visibility criteria and response shape differ from Blueprint. |
-| `browser_network_requests` | `partial` | Local lacks Blueprint’s replay support and richer response-body/filter workflow. |
-| `browser_pdf_save` | `partial` | Local always returns base64 and byte count; Blueprint also supports path persistence and richer metadata. |
-| `browser_handle_dialog` | `parity` | Local behavior matches the core Blueprint dialog-handle semantics. |
-| `browser_list_extensions` | `partial` | Local data shape differs and omits some Blueprint reporting details. |
-| `browser_reload_extensions` | `partial` | Local reloads unpacked extensions, but does not report Blueprint-style skipped packed extensions. |
-| `browser_performance_metrics` | `partial` | Local exposes legacy `performance.timing` deltas; Blueprint computes much richer Web Vitals-style metrics. |
-| `browser_extract_content` | `partial` | Local extracts plain text; Blueprint performs HTML-to-Markdown style extraction with stronger heuristics and metadata. |
-| `list_available_tabs` | `intentional_exclusion` | Local-only multiplexing feature; no Blueprint equivalent is expected here. |
-| `attach_to_tab` | `intentional_exclusion` | Local-only lock-aware attach surface required for multiplexing. |
-| `detach_from_tab` | `intentional_exclusion` | Local-only explicit lock-release surface required for multiplexing. |
+| `browser_tabs` | `parity` | Blueprint-equivalent list/new/attach/close behavior plus local lock-aware semantics and real `activate`/`stealth` handling. |
+| `browser_navigate` | `parity` | Matching local navigation actions with structured metadata instead of Blueprint prose. |
+| `browser_interact` | `parity` | Supports single action and ordered `actions[]`, pointer actions, waits, file upload, pseudo-state forcing, and chained `element_ref` targets. |
+| `browser_snapshot` | `parity` | Returns an accessibility-first semantic snapshot with stable `element_ref`s and viewport metadata. |
+| `browser_lookup` | `parity` | Returns richer match metadata, scoring, visibility, bounds, and `element_ref` handles. |
+| `browser_get_element_styles` | `parity` | Returns computed style plus matched CSS rules/cascade metadata and pseudo-state forcing. |
+| `browser_take_screenshot` | `parity` | Supports viewport/full-page/selector/clip capture, `path`, `highlightClickables`, and `deviceScale`; MCP callers still get image blocks when image data is returned. |
+| `browser_evaluate` | `parity` | Accepts both `expression` and `function` and returns deterministic structured results. |
+| `browser_console_messages` | `parity` | Supports level/text/url filtering plus pagination. |
+| `browser_fill_form` | `parity` | Supports selector/`element_ref` targeting and checkbox/radio/select/text semantics. |
+| `browser_drag` | `parity` | Uses pointer-event sequencing for source/target dragging. |
+| `browser_window` | `parity` | Supports resize/maximize/minimize/close with validation and structured results. |
+| `browser_verify_text_visible` | `parity` | Verifies visible text presence in the attached tab with structured output. |
+| `browser_verify_element_visible` | `parity` | Verifies selector/`element_ref` visibility with structured output. |
+| `browser_network_requests` | `parity` | Supports list/details/replay/clear, filters, response-body inspection, and JSONPath-style lookup. |
+| `browser_pdf_save` | `parity` | Supports PDF generation with optional filesystem persistence and structured metadata. |
+| `browser_handle_dialog` | `parity` | Matches the core Blueprint dialog-handle semantics. |
+| `browser_list_extensions` | `parity` | Reports installed extensions with development-state metadata. |
+| `browser_reload_extensions` | `parity` | Reloads unpacked extensions and reports skipped extensions with reasons. |
+| `browser_performance_metrics` | `parity` | Returns structured navigation timing, Web Vitals, resource summary, and viewport metrics. |
+| `browser_extract_content` | `parity` | Supports `auto`/`full`/`selector` extraction with markdown-oriented output and pagination metadata. |
+| `list_available_tabs` | `intentional_addition` | Local-only multiplexing feature; no Blueprint equivalent is expected here. |
+| `attach_to_tab` | `intentional_addition` | Local-only lock-aware attach surface required for multiplexing. |
+| `detach_from_tab` | `intentional_addition` | Local-only explicit lock-release surface required for multiplexing. |
 
 ## Automated evidence
 
-- Screenshot parity regression coverage:
-  - `bun test ./tests/integration/tool_router.test.ts ./tests/integration/mcp_stdio_protocol_compat.test.ts`
-  - `bun test ./tests/e2e/extension_screenshot_direct.test.ts --timeout 120000`
-- Remaining rows are code-audit validated, not runtime parity-tested.
+- Integration:
+  - `bun test ./tests/integration/tool_router.test.ts ./tests/integration/parity_remaining.test.ts ./tests/integration/mcp_stdio_protocol_compat.test.ts`
+- Browser roundtrip E2E:
+  - `LOCAL_MCP_TEST_BRIDGE_PORT=37879 bun test ./tests/e2e/extension_roundtrip.test.ts --timeout 120000`
 
-## Highest-priority gaps
+## Notes
 
-1. `browser_interact`: missing action depth and weaker selector/event semantics.
-2. `browser_snapshot`: accessibility-tree parity is absent.
-3. `browser_network_requests`: no replay support and reduced filtering/inspection surface.
-4. `browser_performance_metrics`: far below Blueprint fidelity.
-5. `browser_take_screenshot`: still missing a few Blueprint convenience features despite the core fix.
+- Parity is behavioral, not response-text parity.
+- Screenshots remain MCP image-first for callers that do not request `path`; when `path` is requested, the Bun router persists the artifact locally and returns filesystem metadata instead of forcing large base64 payloads back to the model.
+- Local multiplexing tools remain additive and intentionally outside the Blueprint comparison surface.
