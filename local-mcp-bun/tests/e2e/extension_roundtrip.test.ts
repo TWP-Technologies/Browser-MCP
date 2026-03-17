@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,13 @@ const fixture_url_prefix = "http://127.0.0.1:";
 let extension_id = "";
 let fixture_server: Bun.Server | undefined;
 const user_data_dirs: string[] = [];
+
+function create_workspace_output_dir(prefix: string): string {
+  const artifact_root = resolve(process.cwd(), ".tmp-artifacts");
+  mkdirSync(artifact_root, { recursive: true });
+  return mkdtempSync(join(artifact_root, prefix));
+}
+
 const fixture_html = `
 <!doctype html>
 <html lang="en">
@@ -545,7 +552,7 @@ afterAll(async () => {
 
 test("extension bridge supports semantic observation, observability, and pdf export", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e");
-  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-pdf-"));
+  const output_dir = create_workspace_output_dir("local-mcp-roundtrip-pdf-");
   const pdf_output_path = join(output_dir, "fixture.pdf");
 
   try {
@@ -667,7 +674,7 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
 test("extension bridge supports screenshot viewport, full-page, selector, and selector errors", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e-screenshot");
-  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-shot-"));
+  const output_dir = create_workspace_output_dir("local-mcp-roundtrip-shot-");
   const screenshot_output_path = join(output_dir, "fixture.png");
 
   try {
