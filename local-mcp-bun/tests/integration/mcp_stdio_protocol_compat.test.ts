@@ -22,6 +22,7 @@ interface running_server {
 }
 
 const running_servers: running_server[] = [];
+const test_bridge_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
 const project_root = resolve(import.meta.dir, "../..");
 const package_version = (
   JSON.parse(readFileSync(resolve(project_root, "package.json"), "utf8")) as { version?: string }
@@ -34,7 +35,7 @@ function start_stdio_server(): running_server {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
   const pending_by_id = new Map<string, (response: json_rpc_response) => void>();
   const session = new mcp_protocol_session({

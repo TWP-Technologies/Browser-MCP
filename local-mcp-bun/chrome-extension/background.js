@@ -18,6 +18,12 @@ const console_messages_by_tab = new Map();
 /** @type {Map<number, Map<string, any>>} */
 const network_requests_by_tab = new Map();
 
+/** @type {Map<number, Map<string, any>>} */
+const element_refs_by_tab = new Map();
+
+/** @type {Map<number, number>} */
+const element_ref_revision_by_tab = new Map();
+
 let bridge_socket = null;
 let bridge_url = default_bridge_url;
 let mcp_port = default_mcp_port;
@@ -73,6 +79,57 @@ function log_warn(...args) {
 
 function log_error(...args) {
   console.error("[local-mcp-bun-extension]", ...args);
+}
+
+function create_extension_error(code, message, details, retryable = false) {
+  const error = new Error(message);
+  error.code = code;
+  error.details = details;
+  error.retryable = retryable;
+  return error;
+}
+
+function get_element_ref_store(tab_id) {
+  let store = element_refs_by_tab.get(tab_id);
+  if (!store) {
+    store = new Map();
+    element_refs_by_tab.set(tab_id, store);
+  }
+
+  return store;
+}
+
+function get_element_ref_revision(tab_id) {
+  return element_ref_revision_by_tab.get(tab_id) || 0;
+}
+
+function reset_element_refs_for_tab(tab_id) {
+  element_refs_by_tab.set(tab_id, new Map());
+  element_ref_revision_by_tab.set(tab_id, get_element_ref_revision(tab_id) + 1);
+}
+
+function register_element_ref(tab_id, descriptor) {
+  const store = get_element_ref_store(tab_id);
+  const revision = get_element_ref_revision(tab_id);
+  const element_ref = `el_${tab_id}_${revision}_${store.size + 1}`;
+  store.set(element_ref, {
+    ...descriptor,
+    revision,
+  });
+  return element_ref;
+}
+
+function resolve_element_ref_entry(tab_id, element_ref) {
+  const entry = element_refs_by_tab.get(tab_id)?.get(element_ref);
+  if (!entry || entry.revision !== get_element_ref_revision(tab_id)) {
+    throw create_extension_error("STALE_ELEMENT_REFERENCE", `element_ref is stale: ${element_ref}`, {
+      tab_id,
+      element_ref,
+      recovery_hint: "refresh browser_snapshot or browser_lookup and retry",
+    });
+  }
+
+  return entry;
 }
 
 function now() {
@@ -960,7 +1017,16 @@ async function handle_bridge_message(raw_data) {
     send_response(request_id, payload.agent_session_id, false, undefined, `unknown action: ${payload.action}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    send_response(request_id, safe_agent_session_id, false, undefined, message);
+    send_response(
+      request_id,
+      safe_agent_session_id,
+      false,
+      undefined,
+      message,
+      typeof error?.code === "string" ? error.code : undefined,
+      error?.details && typeof error.details === "object" ? error.details : undefined,
+      error?.retryable === true,
+    );
   }
 }
 
@@ -1148,6 +1214,8 @@ async function execute_browser_navigate(args, tab_id) {
     throw new Error(`unsupported browser_navigate action: ${action}`);
   }
 
+  reset_element_refs_for_tab(resolved_tab_id);
+
   const tab = await chrome.tabs.get(resolved_tab_id);
   return {
     tab_id: resolved_tab_id,
@@ -1157,27 +1225,340 @@ async function execute_browser_navigate(args, tab_id) {
   };
 }
 
+async function resolve_selector_target(args, tab_id, selector_field = "selector", element_ref_field = "element_ref") {
+  const selector = typeof args?.[selector_field] === "string" ? args[selector_field].trim() : "";
+  if (selector) {
+    return {
+      selector,
+      element_ref: undefined,
+    };
+  }
+
+  const element_ref = typeof args?.[element_ref_field] === "string" ? args[element_ref_field].trim() : "";
+  if (!element_ref) {
+    return {
+      selector: "",
+      element_ref: undefined,
+    };
+  }
+
+  const entry = resolve_element_ref_entry(tab_id, element_ref);
+  return {
+    selector: entry.selector,
+    element_ref,
+  };
+}
+
+async function resolve_required_selector_target(args, tab_id, tool_name, selector_field = "selector", element_ref_field = "element_ref") {
+  const resolved = await resolve_selector_target(args, tab_id, selector_field, element_ref_field);
+  if (!resolved.selector) {
+    throw create_extension_error("INVALID_ARGUMENT", `${tool_name} requires selector or element_ref`, {
+      tab_id,
+      tool_name,
+    });
+  }
+
+  return resolved;
+}
+
+async function get_selector_center(tab_id, selector) {
+  const point = await execute_in_tab(tab_id, (incoming_selector) => {
+    const target = document.querySelector(incoming_selector);
+    if (!target) {
+      return null;
+    }
+
+    const rect = target.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  }, selector);
+
+  if (!point) {
+    throw create_extension_error("INVALID_ARGUMENT", `selector not found: ${selector}`, {
+      tab_id,
+      selector,
+    });
+  }
+
+  return point;
+}
+
+async function dispatch_mouse_event(tab_id, type, x, y, button = "left", click_count = 1, buttons = 0) {
+  await send_debugger_command(tab_id, "Input.dispatchMouseEvent", {
+    type,
+    x,
+    y,
+    button,
+    clickCount: click_count,
+    buttons,
+  });
+}
+
+async function resolve_dom_node_id(tab_id, selector) {
+  const document_root = await send_debugger_command(tab_id, "DOM.getDocument", {
+    depth: -1,
+    pierce: true,
+  });
+  const root_node_id = document_root?.root?.nodeId;
+  if (typeof root_node_id !== "number") {
+    throw create_extension_error("ATTACH_FAILED", "DOM.getDocument failed to return root node", {
+      tab_id,
+      selector,
+    });
+  }
+
+  const query_result = await send_debugger_command(tab_id, "DOM.querySelector", {
+    nodeId: root_node_id,
+    selector,
+  });
+  const node_id = query_result?.nodeId;
+  if (typeof node_id !== "number" || node_id <= 0) {
+    throw create_extension_error("INVALID_ARGUMENT", `selector not found: ${selector}`, {
+      tab_id,
+      selector,
+    });
+  }
+
+  return node_id;
+}
+
+async function wait_for_selector(tab_id, selector, timeout_ms) {
+  const started_at = Date.now();
+  while (Date.now() - started_at < timeout_ms) {
+    const found = await execute_in_tab(tab_id, (incoming_selector) => {
+      const target = document.querySelector(incoming_selector);
+      if (!target) {
+        return false;
+      }
+
+      const rect = target.getBoundingClientRect();
+      const style = getComputedStyle(target);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    }, selector);
+
+    if (found) {
+      return;
+    }
+
+    await sleep(50);
+  }
+
+  throw create_extension_error("INVALID_ARGUMENT", `wait target not found before timeout: ${selector}`, {
+    tab_id,
+    selector,
+    timeout_ms,
+  });
+}
+
+async function force_pseudo_state(tab_id, selector, pseudo_state) {
+  const node_id = await resolve_dom_node_id(tab_id, selector);
+  await send_debugger_command(tab_id, "CSS.enable", {});
+  await send_debugger_command(tab_id, "CSS.forcePseudoState", {
+    nodeId: node_id,
+    forcedPseudoClasses: [pseudo_state],
+  });
+}
+
 async function execute_browser_snapshot(tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
+  reset_element_refs_for_tab(resolved_tab_id);
 
-  const snapshot = await execute_in_tab(resolved_tab_id, () => {
-    const elements = Array.from(document.querySelectorAll("body *")).slice(0, 200);
+  const page_snapshot = await execute_in_tab(resolved_tab_id, () => {
+    function infer_role(element) {
+      const explicit_role = element.getAttribute("role");
+      if (explicit_role) {
+        return explicit_role;
+      }
 
-    return elements.map((element) => {
-      const html_element = element;
-      const text = (html_element.innerText || "").trim();
-      return {
-        tag: html_element.tagName.toLowerCase(),
-        id: html_element.id || null,
-        class_name: html_element.className || null,
-        text: text.slice(0, 200),
-      };
-    });
+      const tag = element.tagName.toLowerCase();
+      if (tag === "a" && element.getAttribute("href")) {
+        return "link";
+      }
+
+      if (tag === "button") {
+        return "button";
+      }
+
+      if (tag === "select") {
+        return "combobox";
+      }
+
+      if (tag === "textarea") {
+        return "textbox";
+      }
+
+      if (tag === "input") {
+        const type = String(element.getAttribute("type") || "text").toLowerCase();
+        if (type === "checkbox") {
+          return "checkbox";
+        }
+
+        if (type === "radio") {
+          return "radio";
+        }
+
+        if (type === "button" || type === "submit" || type === "reset") {
+          return "button";
+        }
+
+        return "textbox";
+      }
+
+      if (/^h[1-6]$/u.test(tag)) {
+        return "heading";
+      }
+
+      if (tag === "main") {
+        return "main";
+      }
+
+      if (tag === "nav") {
+        return "navigation";
+      }
+
+      if (tag === "form") {
+        return "form";
+      }
+
+      return tag;
+    }
+
+    function infer_name(element) {
+      const aria_label = element.getAttribute("aria-label");
+      if (aria_label && aria_label.trim()) {
+        return aria_label.trim().slice(0, 160);
+      }
+
+      const labelled_by = element.getAttribute("aria-labelledby");
+      if (labelled_by) {
+        const label_text = labelled_by
+          .split(/\s+/u)
+          .map((id) => document.getElementById(id)?.innerText || "")
+          .join(" ")
+          .trim();
+        if (label_text) {
+          return label_text.slice(0, 160);
+        }
+      }
+
+      const placeholder = element.getAttribute("placeholder");
+      if (placeholder && placeholder.trim()) {
+        return placeholder.trim().slice(0, 160);
+      }
+
+      const alt = element.getAttribute("alt");
+      if (alt && alt.trim()) {
+        return alt.trim().slice(0, 160);
+      }
+
+      const value = "value" in element ? String(element.value || "").trim() : "";
+      if (value) {
+        return value.slice(0, 160);
+      }
+
+      const text = (element.innerText || element.textContent || "").trim();
+      if (text) {
+        return text.slice(0, 160);
+      }
+
+      return "";
+    }
+
+    function is_visible(element) {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    }
+
+    function selector_for(element) {
+      if (element.id) {
+        return `#${element.id}`;
+      }
+
+      const data_test_id = element.getAttribute("data-testid");
+      if (data_test_id) {
+        return `[data-testid="${String(data_test_id).replace(/"/gu, '\\"')}"]`;
+      }
+
+      const name = element.getAttribute("name");
+      if (name) {
+        return `${element.tagName.toLowerCase()}[name="${String(name).replace(/"/gu, '\\"')}"]`;
+      }
+
+      const segments = [];
+      let current = element;
+      while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+        let segment = current.tagName.toLowerCase();
+        const parent = current.parentElement;
+        if (parent) {
+          const same_tag_siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current.tagName);
+          if (same_tag_siblings.length > 1) {
+            segment += `:nth-of-type(${same_tag_siblings.indexOf(current) + 1})`;
+          }
+        }
+
+        segments.unshift(segment);
+        current = current.parentElement;
+      }
+
+      return ["body", ...segments].join(" > ");
+    }
+
+    const candidates = new Set([document.body]);
+    for (const element of Array.from(
+      document.querySelectorAll("a[href],button,input,select,textarea,summary,[role],[tabindex],label,h1,h2,h3,h4,h5,h6,main,nav,article,section,form"),
+    )) {
+      candidates.add(element);
+    }
+
+    const nodes = Array.from(candidates)
+      .map((element) => {
+        const role = infer_role(element);
+        const visible = is_visible(element);
+        const interactive = ["link", "button", "textbox", "checkbox", "radio", "combobox"].includes(role);
+        return {
+          tag: element.tagName.toLowerCase(),
+          role,
+          name: infer_name(element),
+          text: (element.innerText || element.textContent || "").trim().slice(0, 200),
+          visible,
+          interactive,
+          selector: selector_for(element),
+          disabled: element.hasAttribute("disabled"),
+        };
+      })
+      .filter((node) => node.visible || node.interactive || node.tag === "body")
+      .sort((left, right) => Number(right.interactive) - Number(left.interactive) || Number(right.visible) - Number(left.visible))
+      .slice(0, 80);
+
+    return {
+      url: location.href,
+      title: document.title,
+      nodes,
+    };
   });
+
+  const snapshot = Array.isArray(page_snapshot?.nodes)
+    ? page_snapshot.nodes.map((node) => ({
+        ...node,
+        element_ref: register_element_ref(resolved_tab_id, {
+          selector: node.selector,
+          tag: node.tag,
+          role: node.role,
+          name: node.name,
+        }),
+      }))
+    : [];
 
   return {
     tab_id: resolved_tab_id,
+    url: page_snapshot?.url,
+    title: page_snapshot?.title,
     snapshot,
+    total_nodes: snapshot.length,
+    truncated: snapshot.length >= 80,
   };
 }
 
@@ -1205,7 +1586,8 @@ async function execute_browser_take_screenshot(args, tab_id) {
   const format = requested_type === "png" ? "png" : "jpeg";
   const mime_type = format === "png" ? "image/png" : "image/jpeg";
   const quality = clamp_screenshot_quality(args?.quality);
-  const selector = typeof args?.selector === "string" ? args.selector.trim() : "";
+  const resolved_target = await resolve_selector_target(args, resolved_tab_id);
+  const selector = resolved_target.selector;
   const padding =
     typeof args?.padding === "number" && Number.isFinite(args.padding) ? Math.max(0, args.padding) : 0;
   const has_clip =
@@ -1346,6 +1728,7 @@ async function execute_browser_take_screenshot(args, tab_id) {
     capture_mode,
     full_page: capture_mode === "full_page",
     selector: selector.length > 0 ? selector : undefined,
+    element_ref: resolved_target.element_ref,
     clip: final_clip
       ? {
           x: final_clip.x,
@@ -1360,7 +1743,12 @@ async function execute_browser_take_screenshot(args, tab_id) {
 
 async function execute_browser_evaluate(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const expression = typeof args?.expression === "string" ? args.expression : "";
+  const expression =
+    typeof args?.expression === "string"
+      ? args.expression
+      : typeof args?.function === "string"
+        ? `(${args.function})()`
+        : "";
 
   if (!expression) {
     throw new Error("browser_evaluate requires expression");
@@ -1396,23 +1784,118 @@ async function execute_browser_evaluate(args, tab_id) {
 
 async function execute_browser_interact(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const actions = Array.isArray(args?.actions) ? args.actions : [];
+  const actions = Array.isArray(args?.actions)
+    ? args.actions
+    : typeof args?.action === "string"
+      ? [{ ...args, type: args.action }]
+      : [];
 
   if (actions.length === 0) {
-    throw new Error("browser_interact requires non-empty actions array");
+    throw new Error("browser_interact requires action or non-empty actions array");
   }
 
   const results = [];
 
-  for (const action of actions) {
+  for (const raw_action of actions) {
+    const action = raw_action && typeof raw_action === "object" ? { ...raw_action } : {};
     const type = action?.type;
 
     if (type === "wait") {
       const timeout = typeof action?.timeout === "number" ? action.timeout : 250;
-      await sleep(timeout);
-      results.push({ type, ok: true });
+      const wait_target = await resolve_selector_target(action, resolved_tab_id);
+      if (wait_target.selector) {
+        await wait_for_selector(resolved_tab_id, wait_target.selector, timeout);
+      } else {
+        await sleep(timeout);
+      }
+      results.push({
+        type,
+        ok: true,
+        selector: wait_target.selector || undefined,
+        element_ref: wait_target.element_ref,
+      });
       continue;
     }
+
+    if (type === "mouse_move" || type === "hover") {
+      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+      const point = await get_selector_center(resolved_tab_id, resolved_target.selector);
+      await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, "none", 0, 0);
+      results.push({
+        type,
+        ok: true,
+        selector: resolved_target.selector,
+        element_ref: resolved_target.element_ref,
+      });
+      continue;
+    }
+
+    if (type === "mouse_click" || type === "click") {
+      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+      const point = await get_selector_center(resolved_tab_id, resolved_target.selector);
+      await dispatch_mouse_event(resolved_tab_id, "mouseMoved", point.x, point.y, "left", 1, 0);
+      await dispatch_mouse_event(resolved_tab_id, "mousePressed", point.x, point.y, "left", 1, 1);
+      await dispatch_mouse_event(resolved_tab_id, "mouseReleased", point.x, point.y, "left", 1, 0);
+      results.push({
+        type,
+        ok: true,
+        selector: resolved_target.selector,
+        element_ref: resolved_target.element_ref,
+      });
+      continue;
+    }
+
+    if (type === "file_upload") {
+      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+      const files = Array.isArray(action?.files) ? action.files.filter((value) => typeof value === "string") : [];
+      if (files.length === 0) {
+        throw create_extension_error("INVALID_ARGUMENT", "file_upload requires non-empty files[]", {
+          tab_id: resolved_tab_id,
+          selector: resolved_target.selector,
+        });
+      }
+
+      const node_id = await resolve_dom_node_id(resolved_tab_id, resolved_target.selector);
+      await send_debugger_command(resolved_tab_id, "DOM.setFileInputFiles", {
+        nodeId: node_id,
+        files,
+      });
+      results.push({
+        type,
+        ok: true,
+        selector: resolved_target.selector,
+        element_ref: resolved_target.element_ref,
+        files,
+      });
+      continue;
+    }
+
+    if (type === "force_pseudo_state") {
+      const resolved_target = await resolve_required_selector_target(action, resolved_tab_id, "browser_interact");
+      const pseudo = typeof action?.pseudo === "string" ? action.pseudo : typeof action?.value === "string" ? action.value : "";
+      if (!pseudo) {
+        throw create_extension_error("INVALID_ARGUMENT", "force_pseudo_state requires pseudo", {
+          tab_id: resolved_tab_id,
+          selector: resolved_target.selector,
+        });
+      }
+
+      await force_pseudo_state(resolved_tab_id, resolved_target.selector, pseudo);
+      results.push({
+        type,
+        ok: true,
+        selector: resolved_target.selector,
+        element_ref: resolved_target.element_ref,
+        pseudo,
+      });
+      continue;
+    }
+
+    const resolved_target = await resolve_selector_target(action, resolved_tab_id);
+    const prepared_action = {
+      ...action,
+      selector: resolved_target.selector,
+    };
 
     const action_result = await execute_in_tab(resolved_tab_id, (incoming_action) => {
       const action_type = incoming_action.type;
@@ -1516,9 +1999,17 @@ async function execute_browser_interact(args, tab_id) {
       }
 
       return { type: action_type, ok: false, error: `unsupported interaction type: ${action_type}` };
-    }, action);
+    }, prepared_action);
 
-    results.push(action_result);
+    results.push({
+      ...action_result,
+      selector: resolved_target.selector || undefined,
+      element_ref: resolved_target.element_ref,
+    });
+
+    if (!action_result?.ok) {
+      break;
+    }
   }
 
   return {
@@ -1529,10 +2020,21 @@ async function execute_browser_interact(args, tab_id) {
 
 async function execute_browser_fill_form(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const fields = Array.isArray(args?.fields) ? args.fields : [];
+  const raw_fields = Array.isArray(args?.fields) ? args.fields : [];
 
-  if (fields.length === 0) {
+  if (raw_fields.length === 0) {
     throw new Error("browser_fill_form requires fields[]");
+  }
+
+  const fields = [];
+  for (const raw_field of raw_fields) {
+    const field = raw_field && typeof raw_field === "object" ? raw_field : {};
+    const resolved_target = await resolve_selector_target(field, resolved_tab_id);
+    fields.push({
+      ...field,
+      selector: resolved_target.selector,
+      element_ref: resolved_target.element_ref,
+    });
   }
 
   const result = await execute_in_tab(resolved_tab_id, (incoming_fields) => {
@@ -1550,6 +2052,56 @@ async function execute_browser_fill_form(args, tab_id) {
       const element = document.querySelector(selector);
       if (!element) {
         statuses.push({ selector, ok: false, error: "selector not found" });
+        continue;
+      }
+
+      const tag = element.tagName.toLowerCase();
+      const input_type = tag === "input" ? String(element.getAttribute("type") || "text").toLowerCase() : "";
+
+      if (tag === "select") {
+        const select = element;
+        const expected = String(value ?? "");
+        let matched = false;
+        for (const option of Array.from(select.options)) {
+          if (option.value === expected || option.text === expected) {
+            select.value = option.value;
+            matched = true;
+            break;
+          }
+        }
+
+        if (!matched) {
+          statuses.push({ selector, ok: false, error: `option not found: ${expected}` });
+          continue;
+        }
+
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        statuses.push({ selector, ok: true });
+        continue;
+      }
+
+      if (input_type === "checkbox") {
+        element.checked = Boolean(value);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        statuses.push({ selector, ok: true });
+        continue;
+      }
+
+      if (input_type === "radio") {
+        if (typeof value === "string" && element.name) {
+          const radio_group = document.querySelector(`input[type="radio"][name="${element.name}"][value="${value}"]`);
+          if (radio_group) {
+            radio_group.checked = true;
+            radio_group.dispatchEvent(new Event("change", { bubbles: true }));
+            statuses.push({ selector, ok: true });
+            continue;
+          }
+        }
+
+        element.checked = true;
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        statuses.push({ selector, ok: true });
         continue;
       }
 
@@ -1602,6 +2154,24 @@ async function execute_browser_lookup(args, tab_id) {
       return selector;
     }
 
+    function infer_role(element) {
+      const explicit_role = element.getAttribute("role");
+      if (explicit_role) {
+        return explicit_role;
+      }
+
+      const tag = element.tagName.toLowerCase();
+      if (tag === "a" && element.getAttribute("href")) {
+        return "link";
+      }
+
+      if (tag === "button") {
+        return "button";
+      }
+
+      return tag;
+    }
+
     for (const element of Array.from(document.querySelectorAll("body *"))) {
       const text_value = (element.innerText || "").trim();
       if (!text_value) {
@@ -1616,6 +2186,9 @@ async function execute_browser_lookup(args, tab_id) {
         selector: selector_for(element),
         text: text_value.slice(0, 200),
         tag: element.tagName.toLowerCase(),
+        role: infer_role(element),
+        name: text_value.slice(0, 120),
+        visible: true,
       });
 
       if (output.length >= incoming_limit) {
@@ -1628,7 +2201,15 @@ async function execute_browser_lookup(args, tab_id) {
 
   return {
     tab_id: resolved_tab_id,
-    matches,
+    matches: matches.map((match) => ({
+      ...match,
+      element_ref: register_element_ref(resolved_tab_id, {
+        selector: match.selector,
+        tag: match.tag,
+        role: match.role,
+        name: match.name,
+      }),
+    })),
   };
 }
 
@@ -1654,11 +2235,8 @@ async function execute_browser_verify_text_visible(args, tab_id) {
 
 async function execute_browser_verify_element_visible(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const selector = typeof args?.selector === "string" ? args.selector : "";
-
-  if (!selector) {
-    throw new Error("browser_verify_element_visible requires selector");
-  }
+  const resolved_target = await resolve_required_selector_target(args, resolved_tab_id, "browser_verify_element_visible");
+  const selector = resolved_target.selector;
 
   const visible = await execute_in_tab(resolved_tab_id, (incoming_selector) => {
     const element = document.querySelector(incoming_selector);
@@ -1675,6 +2253,7 @@ async function execute_browser_verify_element_visible(args, tab_id) {
   return {
     tab_id: resolved_tab_id,
     selector,
+    element_ref: resolved_target.element_ref,
     visible,
   };
 }
@@ -1682,7 +2261,8 @@ async function execute_browser_verify_element_visible(args, tab_id) {
 async function execute_browser_extract_content(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   const mode = typeof args?.mode === "string" ? args.mode : "auto";
-  const selector = typeof args?.selector === "string" ? args.selector : "body";
+  const resolved_target = await resolve_selector_target(args, resolved_tab_id);
+  const selector = resolved_target.selector || (typeof args?.selector === "string" ? args.selector : "body");
   const max_lines = typeof args?.max_lines === "number" ? Math.max(1, args.max_lines) : 500;
   const offset = typeof args?.offset === "number" ? Math.max(0, args.offset) : 0;
 
@@ -1709,6 +2289,8 @@ async function execute_browser_extract_content(args, tab_id) {
   return {
     tab_id: resolved_tab_id,
     mode,
+    selector,
+    element_ref: resolved_target.element_ref,
     offset,
     max_lines,
     content: sliced_lines.join("\n"),
@@ -1718,11 +2300,13 @@ async function execute_browser_extract_content(args, tab_id) {
 
 async function execute_browser_get_element_styles(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const selector = typeof args?.selector === "string" ? args.selector : "";
+  const resolved_target = await resolve_required_selector_target(args, resolved_tab_id, "browser_get_element_styles");
+  const selector = resolved_target.selector;
   const property = typeof args?.property === "string" ? args.property : undefined;
+  const pseudo_state = typeof args?.pseudoState === "string" ? args.pseudoState : "";
 
-  if (!selector) {
-    throw new Error("browser_get_element_styles requires selector");
+  if (pseudo_state) {
+    await force_pseudo_state(resolved_tab_id, selector, pseudo_state);
   }
 
   const styles = await execute_in_tab(resolved_tab_id, (incoming_selector, incoming_property) => {
@@ -1756,6 +2340,9 @@ async function execute_browser_get_element_styles(args, tab_id) {
 
   return {
     tab_id: resolved_tab_id,
+    selector,
+    element_ref: resolved_target.element_ref,
+    pseudo_state: pseudo_state || undefined,
     ...styles,
   };
 }
@@ -1980,31 +2567,37 @@ async function execute_browser_performance_metrics(tab_id) {
 
 async function execute_browser_drag(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
-  const from_selector = args?.fromSelector;
-  const to_selector = args?.toSelector;
+  const from_target = await resolve_required_selector_target(
+    {
+      selector: args?.fromSelector,
+      element_ref: args?.fromElementRef,
+    },
+    resolved_tab_id,
+    "browser_drag",
+  );
+  const to_target = await resolve_required_selector_target(
+    {
+      selector: args?.toSelector,
+      element_ref: args?.toElementRef,
+    },
+    resolved_tab_id,
+    "browser_drag",
+  );
+  const from_point = await get_selector_center(resolved_tab_id, from_target.selector);
+  const to_point = await get_selector_center(resolved_tab_id, to_target.selector);
 
-  if (typeof from_selector !== "string" || typeof to_selector !== "string") {
-    throw new Error("browser_drag requires fromSelector and toSelector strings");
-  }
-
-  const result = await execute_in_tab(resolved_tab_id, (from, to) => {
-    const source = document.querySelector(from);
-    const target = document.querySelector(to);
-
-    if (!source || !target) {
-      return { ok: false, error: "drag source/target not found" };
-    }
-
-    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true }));
-    target.dispatchEvent(new DragEvent("drop", { bubbles: true }));
-    source.dispatchEvent(new DragEvent("dragend", { bubbles: true }));
-
-    return { ok: true };
-  }, from_selector, to_selector);
+  await dispatch_mouse_event(resolved_tab_id, "mouseMoved", from_point.x, from_point.y, "left", 1, 0);
+  await dispatch_mouse_event(resolved_tab_id, "mousePressed", from_point.x, from_point.y, "left", 1, 1);
+  await dispatch_mouse_event(resolved_tab_id, "mouseMoved", to_point.x, to_point.y, "left", 1, 1);
+  await dispatch_mouse_event(resolved_tab_id, "mouseReleased", to_point.x, to_point.y, "left", 1, 0);
 
   return {
     tab_id: resolved_tab_id,
-    ...result,
+    ok: true,
+    from_selector: from_target.selector,
+    from_element_ref: from_target.element_ref,
+    to_selector: to_target.selector,
+    to_element_ref: to_target.element_ref,
   };
 }
 
@@ -2017,6 +2610,7 @@ async function attach_to_tab(tab_id) {
 
   network_requests_by_tab.set(resolved_tab_id, new Map());
   console_messages_by_tab.set(resolved_tab_id, []);
+  reset_element_refs_for_tab(resolved_tab_id);
 
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId: resolved_tab_id }, "1.3", () => {
@@ -2033,6 +2627,8 @@ async function attach_to_tab(tab_id) {
   try {
     await send_debugger_command(resolved_tab_id, "Network.enable", {});
     await send_debugger_command(resolved_tab_id, "Runtime.enable", {});
+    await send_debugger_command(resolved_tab_id, "DOM.enable", {});
+    await send_debugger_command(resolved_tab_id, "CSS.enable", {});
   } catch (error) {
     log_warn("debugger domain enable failed", error);
   }
@@ -2054,18 +2650,23 @@ async function detach_from_tab(tab_id) {
 
       attached_tab_ids.delete(resolved_tab_id);
       network_requests_by_tab.delete(resolved_tab_id);
+      console_messages_by_tab.delete(resolved_tab_id);
+      element_refs_by_tab.delete(resolved_tab_id);
       resolve(undefined);
     });
   });
 }
 
-function send_response(request_id, agent_session_id, ok, result, error) {
+function send_response(request_id, agent_session_id, ok, result, error, error_code, error_details, retryable = false) {
   send_json({
     request_id,
     agent_session_id,
     ok,
     result,
     error,
+    error_code,
+    error_details,
+    retryable,
   });
 }
 
@@ -2206,6 +2807,7 @@ async function send_debugger_command(tab_id, method, params) {
 globalThis.local_mcp_extension_test_api = {
   attach_to_tab,
   detach_from_tab,
+  execute_browser_snapshot,
   execute_browser_take_screenshot,
 };
 

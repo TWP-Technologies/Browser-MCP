@@ -15,6 +15,7 @@ const is_windows = process.platform === "win32";
 const force_cdp_launch = process.env.E2E_FORCE_CDP_LAUNCH === "1";
 const windows_try_persistent_context = process.env.E2E_WINDOWS_TRY_PERSISTENT_CONTEXT === "1";
 const reconnect_wait_timeout_ms = Number.parseInt(process.env.E2E_RECONNECT_WAIT_TIMEOUT_MS ?? "30000", 10);
+const test_bridge_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
 
 let runtime: local_mcp_runtime;
 let context: BrowserContext | undefined;
@@ -396,7 +397,7 @@ beforeAll(async () => {
   runtime = new local_mcp_runtime({
     bridge_mode: "websocket",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   context = await launch_extension_context();
@@ -742,7 +743,7 @@ test("extension popup controls connections, sessions, and bridge port", async ()
       const copied_bridge_url = await popup_page.evaluate(() => {
         return (globalThis as { __popup_test_copied_url__?: string | null }).__popup_test_copied_url__ ?? null;
       });
-      expect(copied_bridge_url).toBe("ws://127.0.0.1:37777/extension");
+      expect(copied_bridge_url).toBe(`ws://127.0.0.1:${test_bridge_port}/extension`);
 
       const motion_profile = await popup_page.evaluate(() => {
         const toggle_button = document.querySelector('button[data-testid="toggle-enabled-btn"]');
@@ -974,7 +975,7 @@ test("extension popup controls connections, sessions, and bridge port", async ()
         port_input.value = String(next_port);
         port_input.dispatchEvent(new Event("input", { bubbles: true }));
         save_button.click();
-      }, 37778);
+      }, test_bridge_port + 1);
       await wait_for_condition(
         async () =>
           bridge.get_state() !== "up" ||
@@ -1035,7 +1036,7 @@ test("extension popup controls connections, sessions, and bridge port", async ()
         port_input.value = String(next_port);
         port_input.dispatchEvent(new Event("input", { bubbles: true }));
         save_button.click();
-      }, 37777);
+      }, test_bridge_port);
       await wait_for_condition(() => bridge.get_state() === "up", 45_000, 150);
 
       await wait_for_condition(

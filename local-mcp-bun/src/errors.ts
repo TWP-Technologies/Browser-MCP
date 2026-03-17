@@ -38,6 +38,28 @@ export function to_tool_error(error: unknown): tool_error {
     return error;
   }
 
+  if (error && typeof error === "object") {
+    const structured_error = error as {
+      code?: unknown;
+      message?: unknown;
+      retryable?: unknown;
+      details?: unknown;
+      correlation_id?: unknown;
+    };
+
+    if (typeof structured_error.code === "string" && typeof structured_error.message === "string") {
+      return new tool_error(
+        structured_error.code as error_code,
+        structured_error.message,
+        structured_error.retryable === true,
+        structured_error.details && typeof structured_error.details === "object"
+          ? (structured_error.details as Record<string, unknown>)
+          : undefined,
+        typeof structured_error.correlation_id === "string" ? structured_error.correlation_id : undefined,
+      );
+    }
+  }
+
   const message = error instanceof Error ? error.message : String(error);
   return new tool_error("ATTACH_FAILED", message, false);
 }

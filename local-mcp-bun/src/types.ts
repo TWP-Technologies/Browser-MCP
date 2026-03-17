@@ -9,6 +9,7 @@ export type error_code =
   | "LOCK_NOT_OWNED"
   | "TAB_NOT_FOUND"
   | "INVALID_ARGUMENT"
+  | "STALE_ELEMENT_REFERENCE"
   | "EXTENSION_UNAVAILABLE"
   | "ATTACH_FAILED"
   | "DETACH_FAILED"
@@ -91,6 +92,9 @@ export interface extension_response {
   ok: boolean;
   result?: unknown;
   error?: string;
+  error_code?: error_code;
+  error_details?: Record<string, unknown>;
+  retryable?: boolean;
 }
 
 export interface extension_request {

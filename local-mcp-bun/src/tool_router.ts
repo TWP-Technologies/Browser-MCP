@@ -157,11 +157,116 @@ export class tool_router {
     ];
 
     for (const tool_name of passthrough_tools) {
+      if (tool_name === "browser_snapshot") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_snapshot. Returns a compact semantic snapshot with chainable element_ref targets.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_interact") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_interact. Executes a single action or ordered actions[] against selector or element_ref targets.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              action: { type: "string" },
+              selector: { type: "string" },
+              element_ref: { type: "string" },
+              text: { type: "string" },
+              key: { type: "string" },
+              timeout: { type: "number", minimum: 0 },
+              pseudo: { type: "string" },
+              files: {
+                type: "array",
+                items: { type: "string" },
+              },
+              actions: {
+                type: "array",
+                items: {
+                  type: "object",
+                },
+              },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_fill_form") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_fill_form. Fills resolved fields using selector or element_ref targets.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              fields: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    selector: { type: "string" },
+                    element_ref: { type: "string" },
+                    value: {},
+                  },
+                },
+              },
+            },
+            required: ["fields"],
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_lookup") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_lookup. Finds text-like matches and returns selector plus element_ref metadata for follow-up actions.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              text: { type: "string" },
+              limit: { type: "number", minimum: 1, maximum: 50 },
+            },
+            required: ["text"],
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_get_element_styles") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_get_element_styles. Reads element styles using selector or element_ref targets.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              selector: { type: "string" },
+              element_ref: { type: "string" },
+              property: { type: "string" },
+              pseudoState: { type: "string" },
+            },
+          },
+        });
+        continue;
+      }
+
       if (tool_name === "browser_take_screenshot") {
         base_tools.push({
           name: tool_name,
           description:
-            "Forwarded browser tool: browser_take_screenshot. Captures viewport, full-page, selector, or clipped screenshots from the attached tab.",
+            "Forwarded browser tool: browser_take_screenshot. Captures viewport, full-page, selector, element_ref, or clipped screenshots from the attached tab.",
           inputSchema: {
             type: "object",
             properties: {
@@ -169,12 +274,31 @@ export class tool_router {
               quality: { type: "number", minimum: 0, maximum: 100 },
               fullPage: { type: "boolean" },
               selector: { type: "string" },
+              element_ref: { type: "string" },
               padding: { type: "number", minimum: 0 },
               clip_x: { type: "number" },
               clip_y: { type: "number" },
               clip_width: { type: "number", exclusiveMinimum: 0 },
               clip_height: { type: "number", exclusiveMinimum: 0 },
               clip_coordinateSystem: { type: "string", enum: ["viewport", "page"] },
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool_name === "browser_drag") {
+        base_tools.push({
+          name: tool_name,
+          description:
+            "Forwarded browser tool: browser_drag. Performs a drag from source to target using selector or element_ref inputs.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              fromSelector: { type: "string" },
+              toSelector: { type: "string" },
+              fromElementRef: { type: "string" },
+              toElementRef: { type: "string" },
             },
           },
         });

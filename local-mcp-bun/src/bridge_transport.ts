@@ -57,6 +57,8 @@ export class in_memory_bridge_transport implements bridge_transport {
   private state: bridge_state;
   private readonly tabs_by_id: Map<number, tab_snapshot>;
   private readonly request_log: extension_request[];
+  private readonly element_refs_by_tab: Map<number, Map<string, string>>;
+  private readonly element_ref_revision_by_tab: Map<number, number>;
   private on_detach_handler?: (tab_id: number, reason: string) => void;
   private on_state_change_handler?: (state: bridge_state) => void;
   private on_ui_admin_request_handler?: (
@@ -70,6 +72,8 @@ export class in_memory_bridge_transport implements bridge_transport {
     this.state = "up";
     this.tabs_by_id = new Map<number, tab_snapshot>();
     this.request_log = [];
+    this.element_refs_by_tab = new Map<number, Map<string, string>>();
+    this.element_ref_revision_by_tab = new Map<number, number>();
     this.last_connections_snapshot = null;
   }
 
@@ -277,6 +281,8 @@ export class in_memory_bridge_transport implements bridge_transport {
         tab.title = url;
       }
 
+      this.reset_element_refs_for_tab(tab_id);
+
       return {
         tab_id,
         url: tab.url,
@@ -285,20 +291,55 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     if (tool_name === "browser_snapshot") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_snapshot", false);
+      }
+
+      this.reset_element_refs_for_tab(tab_id);
+      const body_ref = this.register_element_ref(tab_id, "body");
+      const button_ref = this.register_element_ref(tab_id, "button.primary-action");
+
       return {
         tab_id,
+        url: this.tabs_by_id.get(tab_id)?.url ?? "about:blank",
+        title: this.tabs_by_id.get(tab_id)?.title ?? "In-memory",
         snapshot: [
-          { tag: "body", text: "In-memory snapshot root" },
-          { tag: "p", text: "Synthetic snapshot output for testing." },
+          {
+            tag: "body",
+            role: "document",
+            name: "Synthetic document",
+            text: "In-memory snapshot root",
+            selector: "body",
+            element_ref: body_ref,
+            visible: true,
+          },
+          {
+            tag: "button",
+            role: "button",
+            name: "Primary action",
+            text: "Continue",
+            selector: "button.primary-action",
+            element_ref: button_ref,
+            visible: true,
+          },
         ],
+        total_nodes: 2,
+        truncated: false,
       };
     }
 
     if (tool_name === "browser_evaluate") {
-      const expression = typeof args.expression === "string" ? args.expression : "";
+      const expression =
+        typeof args.expression === "string"
+          ? args.expression
+          : typeof args.function === "string"
+            ? `(${args.function})()`
+            : "";
       return {
         tab_id,
-        result: `in-memory-eval:${expression}`,
+        ok: true,
+        value: `in-memory-eval:${expression}`,
+        value_type: "string",
       };
     }
 
@@ -321,22 +362,125 @@ export class in_memory_bridge_transport implements bridge_transport {
     if (tool_name === "browser_extract_content") {
       return {
         tab_id,
+        mode: typeof args.mode === "string" ? args.mode : "auto",
         content: "# In-memory Extracted Content\n\nSynthetic content body.",
       };
     }
 
     if (tool_name === "browser_lookup") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_lookup", false);
+      }
+
       const text = typeof args.text === "string" ? args.text : "";
+      const selector = "button.primary-action";
+      const element_ref = this.register_element_ref(tab_id, selector);
       return {
         tab_id,
         matches: text.length
           ? [
               {
-                selector: "body",
+                selector,
+                element_ref,
+                role: "button",
+                name: "Primary action",
+                visible: true,
                 text,
               },
             ]
           : [],
+      };
+    }
+
+    if (tool_name === "browser_interact") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_interact", false);
+      }
+
+      const actions = this.normalize_interact_actions(args);
+      const results: Array<Record<string, unknown>> = [];
+
+      for (const action of actions) {
+        const type = typeof action.type === "string" ? action.type : "unknown";
+        const selector = this.resolve_selector_from_args_optional(tab_id, action);
+        const result: Record<string, unknown> = { type, ok: true };
+
+        if (selector) {
+          result.selector = selector;
+        }
+
+        if (typeof action.element_ref === "string") {
+          result.element_ref = action.element_ref;
+        }
+
+        if ((type === "click" || type === "mouse_click" || type === "hover" || type === "mouse_move" || type === "type") && !selector) {
+          result.ok = false;
+          result.error_code = "INVALID_ARGUMENT";
+          result.error = "selector or element_ref is required";
+          results.push(result);
+          break;
+        }
+
+        if (type === "type") {
+          result.value = typeof action.text === "string" ? action.text : "";
+        }
+
+        results.push(result);
+      }
+
+      return {
+        tab_id,
+        results,
+      };
+    }
+
+    if (tool_name === "browser_fill_form") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_fill_form", false);
+      }
+
+      const fields = Array.isArray(args.fields) ? args.fields : [];
+      return {
+        tab_id,
+        fields: fields.map((field) => {
+          const selector =
+            field && typeof field === "object"
+              ? this.resolve_selector_from_args_optional(tab_id, field as Record<string, unknown>)
+              : undefined;
+
+          return {
+            selector,
+            element_ref:
+              field && typeof field === "object" && typeof (field as Record<string, unknown>).element_ref === "string"
+                ? (field as Record<string, unknown>).element_ref
+                : undefined,
+            ok: Boolean(selector),
+            error: selector ? undefined : "selector or element_ref is required",
+          };
+        }),
+      };
+    }
+
+    if (tool_name === "browser_get_element_styles") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_get_element_styles", false);
+      }
+
+      const selector = this.resolve_required_selector_from_args(tab_id, args, "browser_get_element_styles");
+      const property = typeof args.property === "string" ? args.property : undefined;
+      return {
+        tab_id,
+        found: true,
+        selector,
+        element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
+        property,
+        value: property ? "synthetic-value" : undefined,
+        styles: property
+          ? undefined
+          : {
+              display: "block",
+              color: "rgb(0, 0, 0)",
+            },
       };
     }
 
@@ -366,14 +510,19 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     if (tool_name === "browser_take_screenshot") {
+      if (typeof tab_id !== "number") {
+        throw new tool_error("INVALID_ARGUMENT", "tab_id is required for browser_take_screenshot", false);
+      }
+
       const format = args.type === "png" ? "png" : "jpeg";
       const mime_type = format === "png" ? "image/png" : "image/jpeg";
+      const resolved_selector = this.resolve_selector_from_args_optional(tab_id, args);
       const data_base64 =
         format === "png"
           ? "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nXrkAAAAASUVORK5CYII="
           : "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBIVFRUVFRUVFRUVFRUVFRUVFRUXFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGxAQGi0fHR0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBEQACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAB6A//xAAZEAEAAwEBAAAAAAAAAAAAAAABAAIRITH/2gAIAQEAAT8AmW0q1//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8Af//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8Af//Z";
       const capture_mode =
-        typeof args.selector === "string" && args.selector.length > 0
+        typeof resolved_selector === "string" && resolved_selector.length > 0
           ? "selector"
           : typeof args.clip_x === "number" &&
               typeof args.clip_y === "number" &&
@@ -392,7 +541,8 @@ export class in_memory_bridge_transport implements bridge_transport {
         bytes: Buffer.from(data_base64, "base64").byteLength,
         capture_mode,
         full_page: capture_mode === "full_page",
-        selector: typeof args.selector === "string" && args.selector.length > 0 ? args.selector : undefined,
+        selector: resolved_selector,
+        element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
       };
     }
 
@@ -444,6 +594,78 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     return Math.max(...tab_ids) + 1;
+  }
+
+  private get_element_ref_store(tab_id: number): Map<string, string> {
+    let store = this.element_refs_by_tab.get(tab_id);
+    if (!store) {
+      store = new Map<string, string>();
+      this.element_refs_by_tab.set(tab_id, store);
+    }
+
+    return store;
+  }
+
+  private reset_element_refs_for_tab(tab_id: number): void {
+    this.element_refs_by_tab.set(tab_id, new Map<string, string>());
+    this.element_ref_revision_by_tab.set(tab_id, (this.element_ref_revision_by_tab.get(tab_id) ?? 0) + 1);
+  }
+
+  private register_element_ref(tab_id: number, selector: string): string {
+    const store = this.get_element_ref_store(tab_id);
+    const revision = this.element_ref_revision_by_tab.get(tab_id) ?? 0;
+    const element_ref = `el_${tab_id}_${revision}_${store.size + 1}`;
+    store.set(element_ref, selector);
+    return element_ref;
+  }
+
+  private resolve_selector_from_args_optional(tab_id: number, args: Record<string, unknown>): string | undefined {
+    const selector = typeof args.selector === "string" ? args.selector : undefined;
+    if (selector && selector.length > 0) {
+      return selector;
+    }
+
+    const element_ref = typeof args.element_ref === "string" ? args.element_ref : undefined;
+    if (!element_ref) {
+      return undefined;
+    }
+
+    const resolved_selector = this.get_element_ref_store(tab_id).get(element_ref);
+    if (!resolved_selector) {
+      throw new tool_error("STALE_ELEMENT_REFERENCE", `element_ref is stale: ${element_ref}`, false, {
+        tab_id,
+        element_ref,
+      });
+    }
+
+    return resolved_selector;
+  }
+
+  private resolve_required_selector_from_args(tab_id: number, args: Record<string, unknown>, tool_name: string): string {
+    const selector = this.resolve_selector_from_args_optional(tab_id, args);
+    if (!selector) {
+      throw new tool_error("INVALID_ARGUMENT", `${tool_name} requires selector or element_ref`, false, {
+        tab_id,
+      });
+    }
+
+    return selector;
+  }
+
+  private normalize_interact_actions(args: Record<string, unknown>): Array<Record<string, unknown>> {
+    const actions = Array.isArray(args.actions)
+      ? args.actions.filter((action): action is Record<string, unknown> => Boolean(action) && typeof action === "object")
+      : [];
+
+    if (actions.length > 0) {
+      return actions;
+    }
+
+    if (typeof args.action === "string") {
+      return [{ ...args, type: args.action }];
+    }
+
+    throw new tool_error("INVALID_ARGUMENT", "browser_interact requires action or non-empty actions[]", false);
   }
 
   private record_request(
@@ -790,8 +1012,17 @@ export class websocket_bridge_transport implements bridge_transport {
     }
 
     if (!response.ok) {
-      const error_code = pending.action === "detach_from_tab" ? "DETACH_FAILED" : "ATTACH_FAILED";
-      pending.reject(new tool_error(error_code, response.error ?? "extension request failed", false));
+      const fallback_error_code = pending.action === "detach_from_tab" ? "DETACH_FAILED" : "ATTACH_FAILED";
+      pending.reject(
+        new tool_error(
+          typeof response.error_code === "string" ? response.error_code : fallback_error_code,
+          response.error ?? "extension request failed",
+          response.retryable === true,
+          response.error_details && typeof response.error_details === "object"
+            ? (response.error_details as Record<string, unknown>)
+            : undefined,
+        ),
+      );
       return;
     }
 
