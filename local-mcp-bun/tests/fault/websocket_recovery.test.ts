@@ -185,6 +185,41 @@ test("websocket bridge rejects in-flight requests on disconnect and recovers aft
   await bridge.stop();
 });
 
+test("websocket bridge attach and detach do not depend on in-memory element_ref helpers", async () => {
+  const port = random_port();
+  const bridge = new websocket_bridge_transport("127.0.0.1", port);
+
+  const extension = await connect_fake_extension(port, {
+    respond_to_call_tool: true,
+    tabs: [
+      {
+        tab_id: 301,
+        url: "https://example.com",
+        title: "Example",
+        debugger_attached: false,
+      },
+    ],
+  });
+
+  await wait_for_condition(() => bridge.get_state() === "up");
+
+  const attach_promise = bridge.attach_to_tab(301, "agent-a");
+  await wait_for_condition(() => extension.requests.some((request) => request.action === "attach_to_tab"));
+  await attach_promise;
+
+  const detach_promise = bridge.detach_from_tab(301, "agent-a");
+  await wait_for_condition(() => extension.requests.some((request) => request.action === "detach_from_tab"));
+  await detach_promise;
+
+  expect(extension.requests.map((request) => request.action)).toEqual([
+    "attach_to_tab",
+    "detach_from_tab",
+  ]);
+
+  extension.socket.close(1000, "test complete");
+  await bridge.stop();
+});
+
 test("websocket bridge ignores stale socket errors after active reconnect", async () => {
   const port = random_port();
   const bridge = new websocket_bridge_transport("127.0.0.1", port);

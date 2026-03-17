@@ -3,11 +3,18 @@ import { local_mcp_runtime } from "../../src/runtime";
 import { in_memory_bridge_transport } from "../../src/bridge_transport";
 import { tool_error } from "../../src/errors";
 
+function parse_test_bridge_port(): number {
+  const parsed_port = Number.parseInt(process.env.LOCAL_MCP_TEST_BRIDGE_PORT ?? "37777", 10);
+  return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
+}
+
+const test_bridge_port = parse_test_bridge_port();
+
 test("tool_router lists tabs and lock metadata", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const { agent_session_id } = runtime.tool_router.open_session("test-client");
@@ -25,7 +32,7 @@ test("attach_to_tab enforces lock conflict and detach handoff", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const a = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -53,7 +60,7 @@ test("attach_to_tab supports wait_timeout_ms lock acquisition", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const a = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -82,7 +89,7 @@ test("browser_tabs new assigns lock and enables tab-scoped tool routing", async 
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const session_id = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -109,7 +116,7 @@ test("tab-scoped tools fail when no active tab lock is owned", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const session_id = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -129,7 +136,7 @@ test("tab-scoped browser_pdf_save returns encoded payload when attached", async 
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const session_id = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -146,7 +153,7 @@ test("tab-scoped browser_take_screenshot returns image payload metadata when att
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const session_id = runtime.tool_router.open_session("agent-a").agent_session_id;
@@ -170,7 +177,7 @@ test("open_session enforces optional auth token when configured", () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
     auth_token: "secret-token",
   });
 
@@ -183,7 +190,7 @@ test("bridge request envelope preserves agent_session_id across concurrent sessi
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const bridge = runtime.bridge_transport as in_memory_bridge_transport;
@@ -226,7 +233,7 @@ test("tool_router publishes connections snapshots with sessions and locks", asyn
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const bridge = runtime.bridge_transport as in_memory_bridge_transport;
@@ -252,7 +259,7 @@ test("ui admin close_session releases locks and returns response", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const bridge = runtime.bridge_transport as in_memory_bridge_transport;
@@ -274,7 +281,7 @@ test("ui admin close_all_sessions closes every active session", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const bridge = runtime.bridge_transport as in_memory_bridge_transport;
@@ -308,7 +315,7 @@ test("ui admin detach_tab_lock releases the owner lock", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
-    bridge_port: 37777,
+    bridge_port: test_bridge_port,
   });
 
   const bridge = runtime.bridge_transport as in_memory_bridge_transport;
@@ -340,7 +347,67 @@ test("runtime enforces loopback-only bridge host", () => {
       new local_mcp_runtime({
         bridge_mode: "in_memory",
         bridge_host: "0.0.0.0",
-        bridge_port: 37777,
+        bridge_port: test_bridge_port,
       }),
   ).toThrow();
+});
+
+test("browser_snapshot emits element_ref targets that browser_interact can reuse", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("element-ref-agent").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const snapshot_result = await runtime.tool_router.call_tool(session_id, "browser_snapshot", {});
+  const snapshot = snapshot_result.snapshot as Array<Record<string, unknown>>;
+  const target = snapshot.find((node) => typeof node.element_ref === "string");
+  expect(target).toBeDefined();
+
+  const interact_result = await runtime.tool_router.call_tool(session_id, "browser_interact", {
+    action: "click",
+    element_ref: target?.element_ref,
+  });
+
+  const results = interact_result.results as Array<Record<string, unknown>>;
+  expect(results[0]?.ok).toBe(true);
+  expect(results[0]?.element_ref).toBe(target?.element_ref);
+
+  await runtime.stop();
+});
+
+test("browser_navigate invalidates element_ref handles", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("stale-ref-agent").agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  const snapshot_result = await runtime.tool_router.call_tool(session_id, "browser_snapshot", {});
+  const snapshot = snapshot_result.snapshot as Array<Record<string, unknown>>;
+  const target = snapshot.find((node) => typeof node.element_ref === "string");
+  expect(target).toBeDefined();
+
+  await runtime.tool_router.call_tool(session_id, "browser_navigate", {
+    action: "url",
+    url: "https://example.net",
+  });
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_get_element_styles", {
+      element_ref: target?.element_ref,
+    });
+    throw new Error("expected stale element_ref error");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("STALE_ELEMENT_REFERENCE");
+  }
+
+  await runtime.stop();
 });
