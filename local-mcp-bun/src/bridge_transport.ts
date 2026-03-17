@@ -379,12 +379,21 @@ export class in_memory_bridge_transport implements bridge_transport {
       const tab = this.require_tab(tab_id, "browser_snapshot");
       this.reset_element_refs_for_tab(tab_id);
       const body_ref = this.register_element_ref(tab_id, "body");
+      const heading_ref = this.register_element_ref(tab_id, "main h1");
       const button_ref = this.register_element_ref(tab_id, "button.primary-action");
+      const link_ref = this.register_element_ref(tab_id, "a.primary-link");
 
       return {
         tab_id,
         url: tab.url,
         title: tab.title,
+        viewport: {
+          width: 1280,
+          height: 720,
+          device_pixel_ratio: 1,
+          scroll_x: 0,
+          scroll_y: 0,
+        },
         snapshot: [
           {
             tag: "body",
@@ -394,6 +403,21 @@ export class in_memory_bridge_transport implements bridge_transport {
             selector: "body",
             element_ref: body_ref,
             visible: true,
+            interactive: false,
+            depth: 0,
+            bounds: { x: 0, y: 0, width: 1280, height: 720 },
+          },
+          {
+            tag: "h1",
+            role: "heading",
+            name: "Synthetic heading",
+            text: "In-memory parity fixture",
+            selector: "main h1",
+            element_ref: heading_ref,
+            visible: true,
+            interactive: false,
+            depth: 2,
+            bounds: { x: 48, y: 48, width: 280, height: 40 },
           },
           {
             tag: "button",
@@ -403,9 +427,25 @@ export class in_memory_bridge_transport implements bridge_transport {
             selector: "button.primary-action",
             element_ref: button_ref,
             visible: true,
+            interactive: true,
+            depth: 2,
+            states: { disabled: false },
+            bounds: { x: 48, y: 140, width: 160, height: 40 },
+          },
+          {
+            tag: "a",
+            role: "link",
+            name: "Primary link",
+            text: "Open synthetic link",
+            selector: "a.primary-link",
+            element_ref: link_ref,
+            visible: true,
+            interactive: true,
+            depth: 2,
+            bounds: { x: 48, y: 200, width: 180, height: 24 },
           },
         ],
-        total_nodes: 2,
+        total_nodes: 4,
         truncated: false,
       };
     }
@@ -417,6 +457,9 @@ export class in_memory_bridge_transport implements bridge_transport {
           : typeof args.function === "string"
             ? `(${args.function})()`
             : "";
+      if (!expression) {
+        throw new tool_error("INVALID_ARGUMENT", "browser_evaluate requires expression or function", false);
+      }
       return {
         tab_id,
         ok: true,
@@ -449,10 +492,28 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     if (tool_name === "browser_extract_content") {
+      const mode = typeof args.mode === "string" ? args.mode : "auto";
+      const selector = this.resolve_selector_from_args_optional(tab_id, args) ?? (mode === "selector" ? "main" : undefined);
+      const content_lines = [
+        "# In-memory parity fixture",
+        "",
+        "Synthetic content body.",
+        "",
+        "- First item",
+        "- Second item",
+      ];
+      const offset = typeof args.offset === "number" ? Math.max(0, args.offset) : 0;
+      const max_lines = typeof args.max_lines === "number" ? Math.max(1, args.max_lines) : 500;
       return {
         tab_id,
-        mode: typeof args.mode === "string" ? args.mode : "auto",
-        content: "# In-memory Extracted Content\n\nSynthetic content body.",
+        mode,
+        selector,
+        element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
+        offset,
+        max_lines,
+        total_lines: content_lines.length,
+        truncated: offset + max_lines < content_lines.length,
+        content: content_lines.slice(offset, offset + max_lines).join("\n"),
       };
     }
 
@@ -475,7 +536,10 @@ export class in_memory_bridge_transport implements bridge_transport {
                 role: "button",
                 name: "Primary action",
                 visible: true,
-                text,
+                interactive: true,
+                text: `Continue ${text}`.trim(),
+                score: 0.96,
+                bounds: { x: 48, y: 140, width: 160, height: 40 },
               },
             ]
           : [],
@@ -706,36 +770,156 @@ export class in_memory_bridge_transport implements bridge_transport {
       this.require_tab(tab_id, "browser_get_element_styles");
       const selector = this.resolve_required_selector_from_args(tab_id, args, "browser_get_element_styles");
       const property = typeof args.property === "string" ? args.property : undefined;
+      const pseudo_states = Array.isArray(args.pseudoState)
+        ? args.pseudoState.filter((value): value is string => typeof value === "string")
+        : typeof args.pseudoState === "string"
+          ? [args.pseudoState]
+          : [];
+      const computed_style = {
+        display: "block",
+        color: "rgb(0, 0, 0)",
+        "background-color": "rgb(245, 248, 252)",
+      };
+      const matched_rules = [
+        {
+          selector: ".primary-action",
+          origin: "regular",
+          properties: {
+            display: "inline-flex",
+            color: "rgb(255, 255, 255)",
+          },
+        },
+      ];
       return {
         tab_id,
         found: true,
         selector,
         element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
         property,
-        value: property ? "synthetic-value" : undefined,
-        styles: property
-          ? undefined
-          : {
-              display: "block",
-              color: "rgb(0, 0, 0)",
-            },
+        pseudo_states: pseudo_states.length ? pseudo_states : undefined,
+        value: property ? computed_style[property as keyof typeof computed_style] ?? "synthetic-value" : undefined,
+        computed_style: property ? undefined : computed_style,
+        matched_rules,
+      };
+    }
+
+    if (tool_name === "browser_console_messages") {
+      const level = typeof args.level === "string" ? args.level : undefined;
+      const text = typeof args.text === "string" ? args.text.toLowerCase() : undefined;
+      const url = typeof args.url === "string" ? args.url.toLowerCase() : undefined;
+      const offset = typeof args.offset === "number" ? Math.max(0, args.offset) : 0;
+      const limit = typeof args.limit === "number" ? Math.max(1, args.limit) : 50;
+      let messages = [
+        {
+          level: "info",
+          text: "Synthetic fixture booted",
+          url: "https://example.test/app.js",
+          timestamp: 1_710_000_000_000,
+        },
+        {
+          level: "error",
+          text: "Synthetic parity error",
+          url: "https://example.test/errors.js",
+          timestamp: 1_710_000_000_500,
+        },
+      ];
+
+      if (level) {
+        messages = messages.filter((entry) => entry.level === level);
+      }
+      if (text) {
+        messages = messages.filter((entry) => entry.text.toLowerCase().includes(text));
+      }
+      if (url) {
+        messages = messages.filter((entry) => entry.url.toLowerCase().includes(url));
+      }
+
+      return {
+        tab_id,
+        total: messages.length,
+        offset,
+        limit,
+        messages: messages.slice(offset, offset + limit),
       };
     }
 
     if (tool_name === "browser_network_requests") {
       const action = typeof args.action === "string" ? args.action : "list";
+      const request = {
+        request_id: "req-1",
+        url: "https://example.test/api/items",
+        method: "POST",
+        type: "fetch",
+        status: 200,
+        request_headers: {
+          "content-type": "application/json",
+        },
+        response_headers: {
+          "content-type": "application/json",
+        },
+        request_post_data: "{\"query\":\"items\"}",
+        response_body: "{\"data\":{\"items\":[{\"id\":1,\"name\":\"Widget\"}]}}",
+        mime_type: "application/json",
+        timestamp: 1_710_000_000_250,
+      };
       if (action === "clear") {
         return { tab_id, cleared: true };
       }
 
       if (action === "details") {
-        return { tab_id, request: null };
+        if (args.requestId !== request.request_id) {
+          return { tab_id, request: null };
+        }
+
+        return {
+          tab_id,
+          request,
+          json_path_result: args.jsonPath === "$.data.items[0].id" ? 1 : undefined,
+        };
+      }
+
+      if (action === "replay") {
+        if (args.requestId !== request.request_id) {
+          throw new tool_error("INVALID_ARGUMENT", "browser_network_requests action=replay requires valid requestId", false);
+        }
+
+        return {
+          tab_id,
+          replayed: true,
+          request_id: request.request_id,
+          status: 200,
+          ok: true,
+          response_body_excerpt: "{\"ok\":true}",
+        };
+      }
+
+      let requests = [request];
+      const method = typeof args.method === "string" ? args.method.toUpperCase() : undefined;
+      const status = typeof args.status === "number" ? args.status : undefined;
+      const resource_type = typeof args.resourceType === "string" ? args.resourceType : undefined;
+      const url_pattern = typeof args.urlPattern === "string" ? args.urlPattern.toLowerCase() : undefined;
+      const offset = typeof args.offset === "number" ? Math.max(0, args.offset) : 0;
+      const limit = typeof args.limit === "number" ? Math.max(1, args.limit) : 20;
+
+      if (method) {
+        requests = requests.filter((entry) => entry.method === method);
+      }
+      if (typeof status === "number") {
+        requests = requests.filter((entry) => entry.status === status);
+      }
+      if (resource_type) {
+        requests = requests.filter((entry) => entry.type === resource_type);
+      }
+      if (url_pattern) {
+        requests = requests.filter((entry) => entry.url.toLowerCase().includes(url_pattern));
       }
 
       return {
         tab_id,
-        total: 0,
-        requests: [],
+        total: requests.length,
+        offset,
+        limit,
+        requests: requests.slice(offset, offset + limit),
       };
     }
 
@@ -744,6 +928,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         tab_id,
         data_base64: "JVBERi0xLjQKJcTl8uXr",
         bytes: 16,
+        mime_type: "application/pdf",
       };
     }
 
@@ -782,6 +967,83 @@ export class in_memory_bridge_transport implements bridge_transport {
         full_page: capture_mode === "full_page",
         selector: resolved_selector,
         element_ref: typeof args.element_ref === "string" ? args.element_ref : undefined,
+        quality: format === "jpeg" ? (typeof args.quality === "number" ? args.quality : 80) : undefined,
+        device_scale: typeof args.deviceScale === "number" ? args.deviceScale : 1,
+        highlight_clickables: args.highlightClickables === true,
+        highlighted_clickable_count: args.highlightClickables === true ? 2 : 0,
+      };
+    }
+
+    if (tool_name === "browser_list_extensions") {
+      return {
+        extensions: [
+          {
+            id: "local-mcp",
+            name: "Local MCP",
+            version: "0.2.3",
+            description: "Synthetic local MCP extension",
+            enabled: true,
+            install_type: "development",
+            type: "extension",
+            may_disable: false,
+          },
+          {
+            id: "packed-helper",
+            name: "Packed Helper",
+            version: "1.0.0",
+            description: "Synthetic packed helper",
+            enabled: true,
+            install_type: "normal",
+            type: "extension",
+            may_disable: true,
+          },
+        ],
+      };
+    }
+
+    if (tool_name === "browser_reload_extensions") {
+      const extension_name = typeof args.extensionName === "string" ? args.extensionName : undefined;
+      return {
+        requested_extension_name: extension_name,
+        reloaded: extension_name && extension_name !== "Local MCP" ? [] : ["Local MCP"],
+        skipped: [
+          {
+            name: "Packed Helper",
+            reason: "not_unpacked",
+          },
+        ],
+      };
+    }
+
+    if (tool_name === "browser_performance_metrics") {
+      return {
+        tab_id,
+        url: this.tabs_by_id.get(tab_id)?.url ?? "about:blank",
+        title: this.tabs_by_id.get(tab_id)?.title ?? "In-memory",
+        metrics: {
+          navigation: {
+            dom_content_loaded: 122,
+            load_event_end: 240,
+            dom_interactive: 96,
+            response_start: 41,
+            response_end: 67,
+          },
+          web_vitals: {
+            ttfb: 41,
+            fcp: 118,
+            lcp: 165,
+            cls: 0,
+          },
+          resources: {
+            count: 7,
+            transfer_size: 16384,
+          },
+          viewport: {
+            width: 1280,
+            height: 720,
+            device_pixel_ratio: 1,
+          },
+        },
       };
     }
 

@@ -18,6 +18,7 @@
 - Clean-break v2 API contract for local Bun implementation (no backward-compat guarantee with blueprint tool shapes).
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
 - Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
+- Behavioral Blueprint parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, `element_ref` chaining, and optional local artifact persistence.
 - Crash/restart recovery for client exits and extension restarts.
 - Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.
 - Co-located repository layout for Bun server and custom extension in a single implementation tree.
@@ -192,9 +193,11 @@
   - Lock conflict error payload: `{ code: "LOCK_CONFLICT", retryable: true, details: { tab_id, owner_agent_session_id, requested_wait_timeout_ms? } }`
 - `detach_from_tab(input: { tab_id: number }) -> { tab_id: number, detached: boolean }`
   - If caller does not own lock, MUST return `SESSION_NOT_FOUND` or authorization-style ownership error.
-- `browser_take_screenshot(input: { type?: "jpeg"|"png", quality?: number, fullPage?: boolean, selector?: string, padding?: number, clip_x?: number, clip_y?: number, clip_width?: number, clip_height?: number, clip_coordinateSystem?: "viewport"|"page" })`
+- `browser_take_screenshot(input: { type?: "jpeg"|"png", quality?: number, fullPage?: boolean, selector?: string, element_ref?: string, padding?: number, path?: string, highlightClickables?: boolean, deviceScale?: number, clip_x?: number, clip_y?: number, clip_width?: number, clip_height?: number, clip_coordinateSystem?: "viewport"|"page" })`
   - The server MUST return an MCP `content` image block plus structured metadata describing capture mode and image MIME type.
   - Supported capture modes MUST include `viewport`, `full_page`, `selector`, and `clip`.
+- `browser_pdf_save(input: { path?: string, landscape?: boolean })`
+  - When `path` is provided, the server SHOULD persist the PDF locally and return filesystem metadata instead of returning large inline payloads to MCP callers.
 
 ### 8.5 Internal Components
 

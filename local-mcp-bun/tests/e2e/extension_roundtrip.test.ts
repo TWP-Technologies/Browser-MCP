@@ -85,6 +85,8 @@ const fixture_html = `
     <header>
       <h1>Example Domain</h1>
       <p>Test fixture page.</p>
+      <a class="primary-link" href="#capture-target">Open capture target</a>
+      <button class="primary-action" type="button">Primary action</button>
     </header>
     <main>
       <section id="capture-target">
@@ -94,6 +96,18 @@ const fixture_html = `
       <div class="spacer"></div>
       <footer>Bottom of fixture.</footer>
     </main>
+    <script>
+      window.__fixture_network_request__ = fetch('/api/items', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ query: 'fixture-items' })
+      }).then((response) => response.json()).then((payload) => {
+        document.body.dataset.networkName = payload.data.items[0].name;
+        return payload;
+      });
+    </script>
   </body>
 </html>
 `;
@@ -184,6 +198,25 @@ function start_fixture_server(): Bun.Server {
         hostname: "127.0.0.1",
         fetch(request) {
           const url = new URL(request.url);
+          if (url.pathname === "/api/items") {
+            return new Response(
+              JSON.stringify({
+                data: {
+                  items: [
+                    {
+                      id: 1,
+                      name: "Fixture Widget",
+                    },
+                  ],
+                },
+              }),
+              {
+                headers: {
+                  "content-type": "application/json",
+                },
+              },
+            );
+          }
           if (url.pathname === "/fixture") {
             return new Response(fixture_html, {
               headers: {
@@ -456,6 +489,22 @@ beforeAll(async () => {
     }
     extension_id = extension_url_match[1];
 
+    const bootstrap_page = await context.newPage();
+    try {
+      await bootstrap_page.goto(`chrome-extension://${extension_id}/popup.html`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60_000,
+      });
+      await bootstrap_page.evaluate(async (next_port) => {
+        await chrome.runtime.sendMessage({
+          type: "ui_set_port",
+          port: next_port,
+        });
+      }, test_bridge_port);
+    } finally {
+      await bootstrap_page.close();
+    }
+
     const page = await context.newPage();
     await page.goto(fixture_url, { waitUntil: "domcontentloaded", timeout: 60_000 });
   } else {
@@ -494,8 +543,10 @@ afterAll(async () => {
   }
 }, 180_000);
 
-test("extension bridge supports attach, navigate, network capture, and pdf export", async () => {
+test("extension bridge supports semantic observation, observability, and pdf export", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e");
+  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-pdf-"));
+  const pdf_output_path = join(output_dir, "fixture.pdf");
 
   try {
     const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
@@ -517,6 +568,18 @@ test("extension bridge supports attach, navigate, network capture, and pdf expor
 
     expect(attach_result.action).toBe("attach");
 
+    const snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
+    expect(Array.isArray(snapshot.snapshot)).toBe(true);
+    expect((snapshot.snapshot as Array<Record<string, unknown>>).some((node) => node.interactive === true)).toBe(true);
+
+    const lookup_result = await runtime.tool_router.call_tool(agent_session_id, "browser_lookup", {
+      text: "Primary action",
+      limit: 5,
+    });
+    const lookup_match = (lookup_result.matches as Array<Record<string, unknown>>)[0];
+    expect(lookup_match?.selector).toBeDefined();
+    expect(lookup_match?.bounds).toBeDefined();
+
     const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {
       text: "Example Domain",
     });
@@ -528,37 +591,74 @@ test("extension bridge supports attach, navigate, network capture, and pdf expor
     });
 
     const evaluate_result = await runtime.tool_router.call_tool(agent_session_id, "browser_evaluate", {
-      expression: "document.title",
+      function: "() => { console.error('fixture-parity-log'); return document.title; }",
     });
 
     expect(evaluate_result.ok).toBe(true);
     expect(String(evaluate_result.value)).toContain("Example Domain");
+
+    const console_messages = await runtime.tool_router.call_tool(agent_session_id, "browser_console_messages", {
+      level: "error",
+      text: "fixture-parity-log",
+    });
+    expect(Number(console_messages.total)).toBeGreaterThanOrEqual(1);
 
     const extracted = await runtime.tool_router.call_tool(agent_session_id, "browser_extract_content", {
       mode: "auto",
     });
 
     expect(String(extracted.content)).toContain("Example Domain");
+    expect(String(extracted.content)).toContain("Open capture target");
+
+    const styles = await runtime.tool_router.call_tool(agent_session_id, "browser_get_element_styles", {
+      selector: "#capture-target",
+      pseudoState: ["hover"],
+    });
+    expect(Array.isArray(styles.matched_rules)).toBe(true);
 
     await sleep(500);
     const network_list = (await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "list",
       limit: 20,
+      method: "POST",
+      urlPattern: "/api/items",
     })) as {
-      requests?: unknown[];
+      requests?: Array<Record<string, unknown>>;
     };
 
     expect(Array.isArray(network_list.requests)).toBe(true);
+    expect((network_list.requests ?? []).length).toBeGreaterThan(0);
+
+    const request_id = String(network_list.requests?.[0]?.request_id ?? "");
+    expect(request_id.length).toBeGreaterThan(0);
+
+    const network_details = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
+      action: "details",
+      requestId: request_id,
+      jsonPath: "$.data.items[0].id",
+    });
+    expect(network_details.json_path_result).toBe(1);
+
+    const replay_result = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
+      action: "replay",
+      requestId: request_id,
+    });
+    expect(replay_result.replayed).toBe(true);
+
+    const performance_metrics = await runtime.tool_router.call_tool(agent_session_id, "browser_performance_metrics", {});
+    expect(((performance_metrics.metrics as Record<string, unknown>).web_vitals as Record<string, unknown>).ttfb).toBeDefined();
 
     const pdf_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_pdf_save", {
-      path: "ignored-by-extension",
+      path: pdf_output_path,
     })) as {
-      data_base64?: string;
+      path?: string;
     };
 
-    expect(typeof pdf_result.data_base64).toBe("string");
-    expect((pdf_result.data_base64 ?? "").length).toBeGreaterThan(0);
+    expect(pdf_result.path).toBe(pdf_output_path);
+    expect(existsSync(pdf_output_path)).toBe(true);
+    expect(readFileSync(pdf_output_path).byteLength).toBeGreaterThan(0);
   } finally {
+    rmSync(output_dir, { recursive: true, force: true });
     await runtime.tool_router.close_session(agent_session_id).catch(() => {
       // Best-effort cleanup when the session was already closed by the test path.
     });
@@ -567,6 +667,8 @@ test("extension bridge supports attach, navigate, network capture, and pdf expor
 
 test("extension bridge supports screenshot viewport, full-page, selector, and selector errors", async () => {
   const { agent_session_id } = runtime.tool_router.open_session("e2e-screenshot");
+  const output_dir = mkdtempSync(join(tmpdir(), "local-mcp-roundtrip-shot-"));
+  const screenshot_output_path = join(output_dir, "fixture.png");
 
   try {
     const tabs_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_tabs", {
@@ -618,6 +720,22 @@ test("extension bridge supports screenshot viewport, full-page, selector, and se
     expect(selector_dimensions.width).toBeLessThan(viewport_dimensions.width);
     expect(selector_dimensions.height).toBeLessThan(viewport_dimensions.height);
 
+    const persisted_result = (await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
+      type: "png",
+      highlightClickables: true,
+      deviceScale: 2,
+      path: screenshot_output_path,
+    })) as screenshot_result & {
+      path?: string;
+      highlighted_clickable_count?: number;
+      device_scale?: number;
+    };
+    expect(persisted_result.path).toBe(screenshot_output_path);
+    expect(persisted_result.highlighted_clickable_count).toBeGreaterThanOrEqual(1);
+    expect(persisted_result.device_scale).toBe(2);
+    expect(existsSync(screenshot_output_path)).toBe(true);
+    expect(readFileSync(screenshot_output_path).byteLength).toBeGreaterThan(0);
+
     try {
       await runtime.tool_router.call_tool(agent_session_id, "browser_take_screenshot", {
         type: "png",
@@ -629,6 +747,7 @@ test("extension bridge supports screenshot viewport, full-page, selector, and se
       expect((error as tool_error).message).toContain("Element not found");
     }
   } finally {
+    rmSync(output_dir, { recursive: true, force: true });
     await runtime.tool_router.close_session(agent_session_id).catch(() => {
       // Best-effort cleanup when the session was already closed by the test path.
     });
