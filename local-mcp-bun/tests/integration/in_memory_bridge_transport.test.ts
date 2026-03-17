@@ -51,6 +51,7 @@ function create_bridge(): in_memory_bridge_transport {
       url: "https://example.com",
       title: "Example",
       debugger_attached: false,
+      active: true,
     },
   ]);
   return bridge;
@@ -69,3 +70,46 @@ for (const test_case of missing_tab_cases) {
     }
   });
 }
+
+test("in-memory browser_tabs new preserves the active tab when activate=false", async () => {
+  const bridge = create_bridge();
+  await bridge.call_tool(
+    "browser_tabs",
+    {
+      action: "new",
+      url: "https://example.org/background",
+      activate: false,
+    },
+    "agent-a",
+  );
+
+  const listed_tabs = (await bridge.call_tool("browser_tabs", { action: "list" }, "agent-a")) as {
+    tabs: Array<{ tab_id: number; active?: boolean }>;
+  };
+
+  expect(listed_tabs.tabs.find((tab) => tab.tab_id === 101)?.active).toBe(true);
+  expect(listed_tabs.tabs.find((tab) => tab.tab_id !== 101)?.active).toBe(false);
+});
+
+test("in-memory browser_navigate rejects unsupported history actions instead of returning synthetic success", async () => {
+  const bridge = create_bridge();
+
+  try {
+    await bridge.call_tool("browser_navigate", { action: "back" }, "agent-a", 101);
+    throw new Error("expected browser_navigate back to reject in the in-memory bridge");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+  }
+});
+
+test("in-memory browser_navigate reload remains a valid no-op", async () => {
+  const bridge = create_bridge();
+  const response = (await bridge.call_tool("browser_navigate", { action: "reload" }, "agent-a", 101)) as {
+    action: string;
+    url: string;
+  };
+
+  expect(response.action).toBe("reload");
+  expect(response.url).toBe("https://example.com");
+});

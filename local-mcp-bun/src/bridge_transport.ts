@@ -245,8 +245,10 @@ export class in_memory_bridge_transport implements bridge_transport {
         const title = url;
         const activate = args.activate !== false;
         const stealth = args.stealth === true;
-        for (const tab of this.tabs_by_id.values()) {
-          tab.active = false;
+        if (activate) {
+          for (const tab of this.tabs_by_id.values()) {
+            tab.active = false;
+          }
         }
         this.tabs_by_id.set(next_tab_id, {
           tab_id: next_tab_id,
@@ -342,9 +344,21 @@ export class in_memory_bridge_transport implements bridge_transport {
 
         tab.url = url;
         tab.title = url;
+      } else if (action === "reload") {
+        // reload is a no-op in the in-memory bridge but remains a valid navigation action
       } else if (action === "test_page") {
         tab.url = "data:text/html,<html><body><h1>Local MCP Bun Test Page</h1></body></html>";
         tab.title = "Local MCP Bun Test Page";
+      } else {
+        throw new tool_error(
+          "INVALID_ARGUMENT",
+          `browser_navigate action=${String(action)} is not supported in the in-memory bridge`,
+          false,
+          {
+            action,
+            tab_id,
+          },
+        );
       }
 
       this.reset_element_refs_for_tab(tab_id);

@@ -1297,12 +1297,16 @@ async function execute_browser_tabs(args, tab_id) {
       await set_tab_stealth_mode(created_tab.id, true);
     }
 
+    const tabs_snapshot = await get_tabs_snapshot();
+    const created_snapshot =
+      typeof created_tab.id === "number" ? tabs_snapshot.find((tab) => tab.tab_id === created_tab.id) : undefined;
+
     return {
       tab_id: created_tab.id,
       url: created_tab.url,
       title: created_tab.title,
-      index: created_tab.index,
-      active: created_tab.active === true,
+      index: typeof created_snapshot?.index === "number" ? created_snapshot.index : created_tab.index,
+      active: created_snapshot?.active === true || created_tab.active === true,
       stealth,
     };
   }
@@ -1321,7 +1325,10 @@ async function execute_browser_tabs(args, tab_id) {
     const resolved_tab_id =
       typeof args.tab_id === "number" ? args.tab_id : typeof tab_id === "number" ? tab_id : undefined;
     if (typeof resolved_tab_id !== "number") {
-      throw new Error("browser_tabs set_stealth requires tab_id");
+      throw create_extension_error("INVALID_ARGUMENT", "browser_tabs set_stealth requires tab_id", {
+        args,
+        tab_id,
+      });
     }
 
     const stealth = args.stealth === true;
@@ -1993,6 +2000,7 @@ async function execute_browser_interact(args, tab_id) {
     const raw_action = actions[index];
     const action = raw_action && typeof raw_action === "object" ? { ...raw_action } : {};
     const type = action?.type;
+    let action_recorded = false;
 
     try {
       if (type === "wait") {
@@ -2239,6 +2247,7 @@ async function execute_browser_interact(args, tab_id) {
         selector: resolved_target.selector || undefined,
         element_ref: resolved_target.element_ref,
       });
+      action_recorded = true;
 
       if (!action_result?.ok && on_error === "stop") {
         throw create_extension_error(
@@ -2257,8 +2266,7 @@ async function execute_browser_interact(args, tab_id) {
         error: error instanceof Error ? error.message : String(error),
         error_code: typeof error?.code === "string" ? error.code : undefined,
       };
-      const last_result = results[results.length - 1];
-      if (!last_result || last_result.type !== type || last_result.ok !== false) {
+      if (!action_recorded) {
         results.push(failure);
       }
 
