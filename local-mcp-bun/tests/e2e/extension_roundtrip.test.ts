@@ -174,6 +174,10 @@ function find_fixture_tab(tabs: Array<Record<string, unknown>>): Record<string, 
 
 function start_fixture_server(): Bun.Server {
   for (let port = 37940; port <= 37980; port += 1) {
+    if (port === test_bridge_port) {
+      continue;
+    }
+
     try {
       return Bun.serve({
         port,

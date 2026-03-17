@@ -181,6 +181,7 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     tab.debugger_attached = true;
+    this.reset_element_refs_for_tab(tab_id);
   }
 
   public async detach_from_tab(tab_id: number, agent_session_id: string): Promise<void> {
@@ -193,6 +194,7 @@ export class in_memory_bridge_transport implements bridge_transport {
     }
 
     tab.debugger_attached = false;
+    this.reset_element_refs_for_tab(tab_id);
     this.on_detach_handler?.(tab_id, "manual");
   }
 
@@ -766,6 +768,7 @@ export class websocket_bridge_transport implements bridge_transport {
     if (tab) {
       tab.debugger_attached = true;
     }
+    this.reset_element_refs_for_tab(tab_id);
   }
 
   public async detach_from_tab(tab_id: number, agent_session_id: string): Promise<void> {
@@ -775,6 +778,7 @@ export class websocket_bridge_transport implements bridge_transport {
     if (tab) {
       tab.debugger_attached = false;
     }
+    this.reset_element_refs_for_tab(tab_id);
   }
 
   public async call_tool(

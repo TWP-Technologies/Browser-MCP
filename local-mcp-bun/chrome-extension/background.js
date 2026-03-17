@@ -2120,7 +2120,16 @@ async function execute_browser_fill_form(args, tab_id) {
 
       if (input_type === "radio") {
         if (typeof value === "string" && element.name) {
-          const radio_group = document.querySelector(`input[type="radio"][name="${element.name}"][value="${value}"]`);
+          const escape_css_value = (raw_value) => {
+            if (globalThis.CSS && typeof globalThis.CSS.escape === "function") {
+              return globalThis.CSS.escape(String(raw_value));
+            }
+
+            return String(raw_value).replace(/[^a-zA-Z0-9_-]/gu, (character) => `\\${character.codePointAt(0)?.toString(16) ?? ""} `);
+          };
+          const radio_group = document.querySelector(
+            `input[type="radio"][name="${escape_css_value(element.name)}"][value="${escape_css_value(value)}"]`,
+          );
           if (radio_group) {
             radio_group.checked = true;
             radio_group.dispatchEvent(new Event("change", { bubbles: true }));

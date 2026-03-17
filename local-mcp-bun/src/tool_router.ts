@@ -186,6 +186,9 @@ export class tool_router {
               key: { type: "string" },
               timeout: { type: "number", minimum: 0 },
               pseudo: { type: "string" },
+              value: {},
+              x: { type: "number" },
+              y: { type: "number" },
               files: {
                 type: "array",
                 items: { type: "string" },
@@ -195,6 +198,23 @@ export class tool_router {
                 minItems: 1,
                 items: {
                   type: "object",
+                  properties: {
+                    action: { type: "string" },
+                    type: { type: "string" },
+                    selector: { type: "string" },
+                    element_ref: { type: "string" },
+                    text: { type: "string" },
+                    key: { type: "string" },
+                    timeout: { type: "number", minimum: 0 },
+                    pseudo: { type: "string" },
+                    value: {},
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    files: {
+                      type: "array",
+                      items: { type: "string" },
+                    },
+                  },
                 },
               },
             },
