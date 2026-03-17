@@ -35,6 +35,14 @@ function stringify_error(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function is_address_in_use(error: unknown): boolean {
+  if (error && typeof error === "object" && "code" in error && error.code === "EADDRINUSE") {
+    return true;
+  }
+
+  return stringify_error(error).includes("EADDRINUSE");
+}
+
 export async function serve_on_available_loopback_port(options: loopback_server_options): Promise<Bun.Server> {
   const excluded_ports = new Set(Array.from(options.excluded_ports ?? []));
   const attempts = Number.isInteger(options.attempts) && options.attempts > 0 ? options.attempts : 20;
@@ -59,7 +67,7 @@ export async function serve_on_available_loopback_port(options: loopback_server_
       });
     } catch (error) {
       last_error = error;
-      if (stringify_error(error).includes("EADDRINUSE")) {
+      if (is_address_in_use(error)) {
         continue;
       }
 

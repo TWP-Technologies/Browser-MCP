@@ -1615,6 +1615,9 @@ async function resolve_selector_target(args, tab_id, selector_field = "selector"
         if (tag === "a" && element.getAttribute("href")) {
           return "link";
         }
+        if (tag === "nav") {
+          return "navigation";
+        }
         if (tag === "button") {
           return "button";
         }
@@ -1688,6 +1691,11 @@ async function resolve_selector_target(args, tab_id, selector_field = "selector"
       }
 
       function selector_for(element) {
+        const root = document.body;
+        if (!(root instanceof Element)) {
+          return "";
+        }
+
         if (element.id) {
           return `#${escape_css_identifier(element.id)}`;
         }
@@ -1704,7 +1712,13 @@ async function resolve_selector_target(args, tab_id, selector_field = "selector"
 
         const segments = [];
         let current = element;
-        while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+        let truncated = false;
+        while (current && current !== root && current.nodeType === Node.ELEMENT_NODE) {
+          if (segments.length >= 6) {
+            truncated = true;
+            break;
+          }
+
           let segment = current.tagName.toLowerCase();
           const parent = current.parentElement;
           if (parent) {
@@ -1717,7 +1731,17 @@ async function resolve_selector_target(args, tab_id, selector_field = "selector"
           current = current.parentElement;
         }
 
-        return ["body", ...segments].join(" > ");
+        const path_selector = truncated ? `body ${segments.join(" > ")}` : ["body", ...segments].join(" > ");
+        if (!path_selector) {
+          return "";
+        }
+
+        try {
+          const matches = Array.from(document.querySelectorAll(path_selector));
+          return matches.length === 1 && matches[0] === element ? path_selector : "";
+        } catch {
+          return "";
+        }
       }
 
       const selector = typeof descriptor?.selector === "string" ? descriptor.selector : "";
@@ -2122,6 +2146,15 @@ async function execute_browser_snapshot(tab_id) {
   reset_element_refs_for_tab(resolved_tab_id);
 
   const page_snapshot = await execute_in_tab(resolved_tab_id, () => {
+    const viewport = {
+      width: Math.max(1, Math.ceil(window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 1)),
+      height: Math.max(1, Math.ceil(window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 1)),
+      device_pixel_ratio: window.devicePixelRatio || 1,
+      scroll_x: window.pageXOffset || document.documentElement.scrollLeft || 0,
+      scroll_y: window.pageYOffset || document.documentElement.scrollTop || 0,
+    };
+    const root = document.body;
+
     function is_visible(element) {
       if (!(element instanceof Element) || !element.isConnected) {
         return false;
@@ -2264,7 +2297,13 @@ async function execute_browser_snapshot(tab_id) {
     function build_path_selector(element) {
       const segments = [];
       let current = element;
-      while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+      let truncated = false;
+      while (current && current !== root && current.nodeType === Node.ELEMENT_NODE) {
+        if (segments.length >= 6) {
+          truncated = true;
+          break;
+        }
+
         let segment = current.tagName.toLowerCase();
         const parent = current.parentElement;
         if (parent) {
@@ -2277,7 +2316,17 @@ async function execute_browser_snapshot(tab_id) {
         current = current.parentElement;
       }
 
-      return ["body", ...segments].join(" > ");
+      const selector = truncated ? `body ${segments.join(" > ")}` : ["body", ...segments].join(" > ");
+      if (!selector) {
+        return "";
+      }
+
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.includes(element) ? selector : "";
+      } catch {
+        return "";
+      }
     }
 
     function describe_selectors_for(element) {
@@ -2414,10 +2463,20 @@ async function execute_browser_snapshot(tab_id) {
       return normalize_text(element.textContent, 80).length > 0;
     }
 
-    const primary_candidates = [document.body];
+    if (!(root instanceof Element)) {
+      return {
+        url: location.href,
+        title: document.title,
+        viewport,
+        nodes: [],
+        truncated: false,
+      };
+    }
+
+    const primary_candidates = [root];
     const secondary_candidates = [];
     const max_discovered = 360;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     for (let current = walker.nextNode(); current; current = walker.nextNode()) {
       const element = current;
       if (!is_candidate(element)) {
@@ -2478,14 +2537,6 @@ async function execute_browser_snapshot(tab_id) {
         break;
       }
     }
-
-    const viewport = {
-      width: Math.max(1, Math.ceil(window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 1)),
-      height: Math.max(1, Math.ceil(window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 1)),
-      device_pixel_ratio: window.devicePixelRatio || 1,
-      scroll_x: window.pageXOffset || document.documentElement.scrollLeft || 0,
-      scroll_y: window.pageYOffset || document.documentElement.scrollTop || 0,
-    };
 
     return {
       url: location.href,
@@ -3217,6 +3268,11 @@ async function execute_browser_lookup(args, tab_id) {
   const matches = await execute_in_tab(resolved_tab_id, (incoming_text, incoming_limit) => {
     const query = incoming_text.toLowerCase();
     const output = [];
+    const root = document.body;
+
+    if (!(root instanceof Element)) {
+      return output;
+    }
 
     function is_visible(element) {
       if (!(element instanceof Element) || !element.isConnected) {
@@ -3252,7 +3308,13 @@ async function execute_browser_lookup(args, tab_id) {
     function build_path_selector(element) {
       const segments = [];
       let current = element;
-      while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE && segments.length < 6) {
+      let truncated = false;
+      while (current && current !== root && current.nodeType === Node.ELEMENT_NODE) {
+        if (segments.length >= 6) {
+          truncated = true;
+          break;
+        }
+
         let segment = current.tagName.toLowerCase();
         const parent = current.parentElement;
         if (parent) {
@@ -3266,7 +3328,17 @@ async function execute_browser_lookup(args, tab_id) {
         current = current.parentElement;
       }
 
-      return ["body", ...segments].join(" > ");
+      const selector = truncated ? `body ${segments.join(" > ")}` : ["body", ...segments].join(" > ");
+      if (!selector) {
+        return "";
+      }
+
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.includes(element) ? selector : "";
+      } catch {
+        return "";
+      }
     }
 
     function describe_selectors_for(element) {
@@ -3351,7 +3423,7 @@ async function execute_browser_lookup(args, tab_id) {
     const candidates = [];
     const max_candidates = Math.max(incoming_limit * 12, 120);
     const max_scored = Math.max(incoming_limit * 4, 32);
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     for (let current = walker.nextNode(); current; current = walker.nextNode()) {
       const element = current;
       const text_value = normalize_text(element.textContent);
@@ -3453,10 +3525,6 @@ async function load_network_response_body_on_demand(tab_id, request_id, request)
     };
   }
 
-  const response_body = await send_debugger_command(tab_id, "Network.getResponseBody", {
-    requestId: request_id,
-  });
-  const response_body_text = decode_network_body_payload(response_body);
   const content_type =
     typeof request?.response_content_type === "string"
       ? request.response_content_type
@@ -3474,6 +3542,10 @@ async function load_network_response_body_on_demand(tab_id, request_id, request)
     };
   }
 
+  const response_body = await send_debugger_command(tab_id, "Network.getResponseBody", {
+    requestId: request_id,
+  });
+  const response_body_text = decode_network_body_payload(response_body);
   const body_cached = cache_network_body_payload(tab_id, request_id, response_body);
   delete request.response_body_error;
   return {
