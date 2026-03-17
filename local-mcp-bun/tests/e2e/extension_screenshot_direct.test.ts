@@ -16,6 +16,9 @@ let context: BrowserContext | undefined;
 let browser: Browser | undefined;
 let browser_process: ChildProcess | undefined;
 const user_data_dirs: string[] = [];
+const fixture_url_prefix = "http://127.0.0.1:";
+let fixture_server: Bun.Server | undefined;
+let fixture_url = "";
 const fixture_html = `
 <!doctype html>
 <html lang="en">
@@ -82,8 +85,6 @@ const fixture_html = `
   </body>
 </html>
 `;
-const fixture_url = `data:text/html;charset=utf-8,${encodeURIComponent(fixture_html)}`;
-
 interface screenshot_result {
   data_base64?: string;
   mime_type?: string;
@@ -110,6 +111,36 @@ function create_user_data_dir(): string {
   const user_data_dir = mkdtempSync(join(tmpdir(), "local-mcp-bun-e2e-direct-"));
   user_data_dirs.push(user_data_dir);
   return user_data_dir;
+}
+
+function start_fixture_server(): Bun.Server {
+  for (let port = 38020; port <= 38060; port += 1) {
+    try {
+      return Bun.serve({
+        port,
+        hostname: "127.0.0.1",
+        fetch(request) {
+          const url = new URL(request.url);
+          if (url.pathname === "/fixture") {
+            return new Response(fixture_html, {
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+              },
+            });
+          }
+
+          return new Response("not found", { status: 404 });
+        },
+      });
+    } catch (error) {
+      const message = stringify_error(error);
+      if (!message.includes("EADDRINUSE")) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("failed to allocate direct screenshot fixture server port");
 }
 
 async function cleanup_user_data_dir(path: string): Promise<void> {
@@ -425,6 +456,8 @@ async function capture_screenshot(
 }
 
 beforeAll(async () => {
+  fixture_server = start_fixture_server();
+  fixture_url = `${fixture_url_prefix}${fixture_server.port}/fixture`;
   context = await launch_extension_context();
 }, 300_000);
 
@@ -437,6 +470,8 @@ afterAll(async () => {
     }
   } finally {
     context = undefined;
+    fixture_server?.stop(true);
+    fixture_server = undefined;
     await terminate_spawned_browser_process();
     await cleanup_user_data_dirs();
   }
