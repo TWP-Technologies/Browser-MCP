@@ -1,5 +1,22 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-03-18
+
+### Implemented
+
+- Added MCP prompt support for local onboarding guidance:
+  - `learn_browser_mcp`
+  - `attach_and_observe`
+  - `network_debug_flow`
+- Added fallback `learn_browser_mcp` tool output for MCP clients that do not surface prompts well.
+- Improved `tools/list` discoverability for high-friction browser tools with clearer descriptions and property-level argument guidance.
+- Added narrow LLM-ergonomic contract improvements:
+  - `browser_navigate` now defaults to `action='url'` when `url` is provided without `action`
+  - `browser_network_requests` accepts `request_id` as an alias for `requestId`
+  - `detach_from_tab` infers `tab_id` only when the current session owns exactly one tab
+- Added richer corrective error details and initialize-time instructions so MCP clients can recover from common browser-tool mistakes without external docs.
+- Extended integration and browser E2E coverage for prompt discovery, ergonomic aliases/defaults, and single-tab detach inference.
+
 ## 2026-03-17
 
 ### Implemented

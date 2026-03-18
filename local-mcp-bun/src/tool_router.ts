@@ -27,6 +27,17 @@ interface close_all_sessions_result {
   }>;
 }
 
+interface invalid_argument_details_options {
+  args?: Record<string, unknown>;
+  provided_fields?: string[];
+  recovery_hint: string;
+  canonical_example?: Record<string, unknown>;
+  expected_fields?: string[];
+  accepted_aliases?: string[];
+  owned_tab_ids?: number[];
+  recommended_next_tools?: string[];
+}
+
 const passthrough_tools = [
   "browser_navigate",
   "browser_interact",
@@ -70,6 +81,42 @@ function resolve_artifact_path(requested_path: string): string {
   }
 
   return candidate_path;
+}
+
+function build_invalid_argument_details(options: invalid_argument_details_options): Record<string, unknown> {
+  const details: Record<string, unknown> = {
+    recovery_hint: options.recovery_hint,
+  };
+
+  if (options.args) {
+    details.args = options.args;
+  }
+
+  if (options.provided_fields && options.provided_fields.length > 0) {
+    details.provided_fields = options.provided_fields;
+  }
+
+  if (options.canonical_example) {
+    details.canonical_example = options.canonical_example;
+  }
+
+  if (options.expected_fields && options.expected_fields.length > 0) {
+    details.expected_fields = options.expected_fields;
+  }
+
+  if (options.accepted_aliases && options.accepted_aliases.length > 0) {
+    details.accepted_aliases = options.accepted_aliases;
+  }
+
+  if (options.owned_tab_ids && options.owned_tab_ids.length > 0) {
+    details.owned_tab_ids = options.owned_tab_ids;
+  }
+
+  if (options.recommended_next_tools && options.recommended_next_tools.length > 0) {
+    details.recommended_next_tools = options.recommended_next_tools;
+  }
+
+  return details;
 }
 
 export class tool_router {
@@ -145,9 +192,18 @@ export class tool_router {
   public list_tools(): Array<Record<string, unknown>> {
     const base_tools: Array<Record<string, unknown>> = [
       {
+        name: "learn_browser_mcp",
+        description:
+          "Guided overview of the browser MCP operating model, lock model, canonical workflows, and common mistakes. Use this first if the browser tool surface is unfamiliar.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
         name: "list_available_tabs",
         description:
-          "Returns all open tabs with lock metadata, including tab_id, url, title, and is_locked_by_agent",
+          "Read-only overview of open tabs and lock ownership. Use this before attach_to_tab when you want to choose an existing tab.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -156,25 +212,38 @@ export class tool_router {
       {
         name: "attach_to_tab",
         description:
-          "Acquires lock ownership and attaches debugger for a tab. Returns lock conflict if another agent owns the lock.",
+          "Claim lock ownership for tab_id and attach the debugger. Use this before browser_* tools when you want to work on an existing tab. Returns LOCK_CONFLICT instead of stealing another session's lock.",
         inputSchema: {
           type: "object",
           properties: {
-            tab_id: { type: "number", minimum: 1 },
-            wait_timeout_ms: { type: "number", minimum: 1, maximum: 120000 },
+            tab_id: {
+              type: "number",
+              minimum: 1,
+              description: "The browser tab_id to claim and attach.",
+            },
+            wait_timeout_ms: {
+              type: "number",
+              minimum: 1,
+              maximum: 120000,
+              description: "Optional lock wait timeout in milliseconds before returning LOCK_CONFLICT.",
+            },
           },
           required: ["tab_id"],
         },
       },
       {
         name: "detach_from_tab",
-        description: "Detaches debugger and releases lock ownership for a tab",
+        description:
+          "Detach the debugger and release the lock for a tab owned by the current session. If tab_id is omitted, the server infers it only when the session owns exactly one tab.",
         inputSchema: {
           type: "object",
           properties: {
-            tab_id: { type: "number", minimum: 1 },
+            tab_id: {
+              type: "number",
+              minimum: 1,
+              description: "Optional explicit tab_id. Required when the session owns zero or multiple tabs.",
+            },
           },
-          required: ["tab_id"],
         },
       },
     ];
@@ -184,7 +253,7 @@ export class tool_router {
         base_tools.push({
           name: tool_name,
           description:
-            "Forwarded browser tool: browser_snapshot. Returns a compact semantic snapshot with chainable element_ref targets.",
+            "Forwarded browser tool: browser_snapshot. Preferred first read tool after attach. Returns a compact semantic snapshot with optional stable element_ref targets.",
           inputSchema: {
             type: "object",
             properties: {},
@@ -197,17 +266,21 @@ export class tool_router {
         base_tools.push({
           name: tool_name,
           description:
-            "Forwarded browser tool: browser_navigate. Navigates the attached tab to a URL, history target, reload, or local test page.",
+            "Forwarded browser tool: browser_navigate. Navigates the attached tab. Canonical URL navigation is { action: 'url', url: 'https://example.com' }, but providing only url also defaults to action='url'. Use explicit actions for reload/back/forward/test_page.",
           inputSchema: {
             type: "object",
+            anyOf: [{ required: ["action"] }, { required: ["url"] }],
             properties: {
               action: {
                 type: "string",
                 enum: ["url", "back", "forward", "reload", "test_page"],
+                description: "Navigation mode. Use 'url' with url, or explicit history/reload/test_page actions.",
               },
-              url: { type: "string" },
+              url: {
+                type: "string",
+                description: "Target URL. If present without action, the server assumes action='url'.",
+              },
             },
-            required: ["action"],
           },
         });
         continue;
@@ -428,19 +501,36 @@ export class tool_router {
         base_tools.push({
           name: tool_name,
           description:
-            "Forwarded browser tool: browser_network_requests. Lists, inspects, replays, or clears captured network requests for the attached tab.",
+            "Forwarded browser tool: browser_network_requests. Lists, inspects, replays, or clears network traffic observed on the attached tab. Capture starts after attach and later navigation/reload. List is metadata-only; details and replay require requestId.",
           inputSchema: {
             type: "object",
             properties: {
-              action: { type: "string", enum: ["list", "details", "replay", "clear"] },
-              urlPattern: { type: "string" },
-              method: { type: "string" },
-              status: { type: "number" },
-              resourceType: { type: "string" },
-              limit: { type: "number", minimum: 1 },
-              offset: { type: "number", minimum: 0 },
-              requestId: { type: "string" },
-              jsonPath: { type: "string" },
+              action: {
+                type: "string",
+                enum: ["list", "details", "replay", "clear"],
+                description: "Request mode. Omit for metadata-only list. Use details or replay with requestId.",
+              },
+              urlPattern: {
+                type: "string",
+                description: "Optional substring filter applied to request URLs in action=list.",
+              },
+              method: { type: "string", description: "Optional HTTP method filter for action=list." },
+              status: { type: "number", description: "Optional HTTP status filter for action=list." },
+              resourceType: { type: "string", description: "Optional resource type filter for action=list." },
+              limit: { type: "number", minimum: 1, description: "Maximum rows to return for action=list." },
+              offset: { type: "number", minimum: 0, description: "Pagination offset for action=list." },
+              requestId: {
+                type: "string",
+                description: "Canonical request identifier required for action=details and action=replay.",
+              },
+              request_id: {
+                type: "string",
+                description: "Alias for requestId accepted for LLM ergonomics.",
+              },
+              jsonPath: {
+                type: "string",
+                description: "Optional JSONPath query applied to a decoded JSON response body in action=details.",
+              },
             },
           },
         });
@@ -588,11 +678,16 @@ export class tool_router {
 
     base_tools.push({
       name: "browser_tabs",
-      description: "Tab management tool forwarded to extension with lock-aware attach/new/close routing",
+      description:
+        "Tab management tool with lock-aware list, attach, new, and close actions. browser_tabs action='new' creates a tab and immediately attaches it for the current session.",
       inputSchema: {
         type: "object",
         properties: {
-          action: { type: "string" },
+          action: {
+            type: "string",
+            enum: ["list", "attach", "new", "close"],
+            description: "Tab management action.",
+          },
           index: { type: "number" },
           url: { type: "string" },
           tab_id: { type: "number" },
@@ -614,6 +709,10 @@ export class tool_router {
     this.session_registry.touch_session(agent_session_id);
     await this.reconcile_locks_with_bridge("call_tool");
 
+    if (tool_name === "learn_browser_mcp") {
+      return this.get_learn_browser_mcp_result();
+    }
+
     if (tool_name === "list_available_tabs") {
       const tabs = await this.list_available_tabs(agent_session_id);
       return { tabs };
@@ -625,7 +724,7 @@ export class tool_router {
     }
 
     if (tool_name === "detach_from_tab") {
-      const parsed_args = this.parse_detach_args(args);
+      const parsed_args = this.parse_detach_args(agent_session_id, args);
       return await this.detach_from_tab(agent_session_id, parsed_args);
     }
 
@@ -656,6 +755,77 @@ export class tool_router {
 
     await this.publish_connections_snapshot("release_locks_for_session");
     return released_tab_ids;
+  }
+
+  public get_initialize_instructions(): string {
+    return [
+      "This browser MCP multiplexes sessions through one extension and enforces one lock owner per tab.",
+      "Use prompts/get name=learn_browser_mcp or tools/call learn_browser_mcp if the tool surface is unfamiliar.",
+      "Any browser_* tool requires an attached tab. Either list tabs and attach with browser_tabs action='attach' or attach_to_tab, or create a new tab with browser_tabs action='new', which attaches automatically.",
+      "browser_network_requests only captures requests observed after attach and later navigation/reload.",
+    ].join(" ");
+  }
+
+  public list_prompts(): Array<Record<string, unknown>> {
+    return [
+      {
+        name: "learn_browser_mcp",
+        description: "Guided overview of the Browser MCP operating model, workflows, and common mistakes.",
+      },
+      {
+        name: "attach_and_observe",
+        description: "Recommended first workflow for finding a tab, attaching, and observing page state safely.",
+      },
+      {
+        name: "network_debug_flow",
+        description: "Recommended workflow for capturing, inspecting, and replaying network requests on an attached tab.",
+        arguments: [
+          {
+            name: "url_pattern",
+            description: "Optional urlPattern filter to use with browser_network_requests action='list'.",
+            required: false,
+          },
+        ],
+      },
+    ];
+  }
+
+  public get_prompt(name: string, prompt_args: Record<string, unknown> = {}): Record<string, unknown> {
+    const messages = [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: this.render_prompt_text(name, prompt_args),
+        },
+      },
+    ];
+
+    if (name === "learn_browser_mcp") {
+      return {
+        description: "Guided overview of the Browser MCP operating model, workflows, and common mistakes.",
+        messages,
+      };
+    }
+
+    if (name === "attach_and_observe") {
+      return {
+        description: "Recommended first workflow for finding a tab, attaching, and observing page state safely.",
+        messages,
+      };
+    }
+
+    if (name === "network_debug_flow") {
+      return {
+        description: "Recommended workflow for capturing, inspecting, and replaying network requests on an attached tab.",
+        messages,
+      };
+    }
+
+    throw new tool_error("INVALID_ARGUMENT", `unknown prompt: ${name}`, false, {
+      name,
+      recovery_hint: "Call prompts/list to discover the available guidance prompts.",
+    });
   }
 
   public async reconcile_locks_with_bridge(reason: string): Promise<void> {
@@ -745,7 +915,14 @@ export class tool_router {
   private async attach_to_tab(
     agent_session_id: string,
     input: attach_to_tab_input,
-  ): Promise<{ tab_id: number; attached: boolean; owner_agent_session_id: string }> {
+  ): Promise<{
+    tab_id: number;
+    attached: boolean;
+    owner_agent_session_id: string;
+    debugger_attached: boolean;
+    owned_by_current_session: boolean;
+    recommended_next_tools: string[];
+  }> {
     const lock = await this.tab_lock_manager.acquire_lock(input.tab_id, agent_session_id, input.wait_timeout_ms);
 
     try {
@@ -760,6 +937,9 @@ export class tool_router {
         tab_id: input.tab_id,
         attached: true,
         owner_agent_session_id: lock.owner_agent_session_id,
+        debugger_attached: true,
+        owned_by_current_session: true,
+        recommended_next_tools: ["browser_snapshot", "browser_lookup", "browser_navigate", "browser_interact"],
       };
     } catch (error) {
       try {
@@ -781,11 +961,42 @@ export class tool_router {
   private async detach_from_tab(
     agent_session_id: string,
     input: detach_from_tab_input,
-  ): Promise<{ tab_id: number; detached: boolean }> {
+  ): Promise<{
+    tab_id: number;
+    detached: boolean;
+    debugger_attached: boolean;
+    owned_by_current_session: boolean;
+    recommended_next_tools: string[];
+  }> {
     const active_lock = this.tab_lock_manager.get_lock(input.tab_id);
 
     if (!active_lock) {
-      return { tab_id: input.tab_id, detached: true };
+      let state_changed = false;
+
+      try {
+        this.session_registry.mark_tab_released(agent_session_id, input.tab_id);
+        state_changed = true;
+      } catch {
+        // session may not currently own the tab
+      }
+
+      const active_tab_id = this.active_tab_by_session.get(agent_session_id);
+      if (active_tab_id === input.tab_id) {
+        this.active_tab_by_session.delete(agent_session_id);
+        state_changed = true;
+      }
+
+      if (state_changed) {
+        await this.publish_connections_snapshot("detach_from_tab");
+      }
+
+      return {
+        tab_id: input.tab_id,
+        detached: true,
+        debugger_attached: false,
+        owned_by_current_session: false,
+        recommended_next_tools: ["list_available_tabs", "attach_to_tab", "browser_tabs"],
+      };
     }
 
     if (active_lock.owner_agent_session_id !== agent_session_id) {
@@ -817,6 +1028,9 @@ export class tool_router {
     return {
       tab_id: input.tab_id,
       detached: true,
+      debugger_attached: false,
+      owned_by_current_session: false,
+      recommended_next_tools: ["list_available_tabs", "attach_to_tab", "browser_tabs"],
     };
   }
 
@@ -845,16 +1059,67 @@ export class tool_router {
     };
   }
 
-  private parse_detach_args(args: Record<string, unknown>): detach_from_tab_input {
+  private parse_detach_args(agent_session_id: string, args: Record<string, unknown>): detach_from_tab_input {
     const tab_id = args.tab_id;
 
-    if (typeof tab_id !== "number" || !Number.isInteger(tab_id) || tab_id <= 0) {
-      throw new tool_error("INVALID_ARGUMENT", "tab_id must be a positive integer", false, {
-        tab_id,
-      });
+    if (typeof tab_id === "number" && Number.isInteger(tab_id) && tab_id > 0) {
+      return { tab_id };
     }
 
-    return { tab_id };
+    if (typeof tab_id !== "undefined") {
+      throw new tool_error(
+        "INVALID_ARGUMENT",
+        "tab_id must be a positive integer",
+        false,
+        build_invalid_argument_details({
+          args,
+          recovery_hint: "Pass detach_from_tab with an explicit positive integer tab_id.",
+          canonical_example: {
+            tab_id: 101,
+          },
+          expected_fields: ["tab_id"],
+        }),
+      );
+    }
+
+    const owned_tab_ids = [...this.session_registry.get_session(agent_session_id).owned_tab_ids].sort((left, right) => left - right);
+
+    if (owned_tab_ids.length === 1) {
+      return { tab_id: owned_tab_ids[0]! };
+    }
+
+    if (owned_tab_ids.length === 0) {
+      throw new tool_error(
+        "INVALID_ARGUMENT",
+        "detach_from_tab requires tab_id unless the session owns exactly one tab",
+        false,
+        build_invalid_argument_details({
+          args,
+          recovery_hint: "Attach to a tab first or pass tab_id explicitly.",
+          canonical_example: {
+            tab_id: 101,
+          },
+          expected_fields: ["tab_id"],
+          recommended_next_tools: ["list_available_tabs", "attach_to_tab", "browser_tabs"],
+        }),
+      );
+    }
+
+    throw new tool_error(
+      "INVALID_ARGUMENT",
+      "detach_from_tab is ambiguous because this session owns multiple tabs; pass tab_id explicitly",
+      false,
+      build_invalid_argument_details({
+        args,
+        recovery_hint: "Call list_available_tabs or browser_tabs list, choose the tab, then detach with tab_id.",
+        canonical_example: {
+          tab_id: owned_tab_ids[0],
+        },
+        expected_fields: ["tab_id"],
+        owned_tab_ids,
+        recommended_next_tools: ["list_available_tabs", "browser_tabs"],
+      }),
+    );
   }
 
   private handle_detach_notice(tab_id: number): void {
@@ -1249,6 +1514,12 @@ export class tool_router {
         "INVALID_ARGUMENT",
         `${tool_name} requires an attached tab. Use attach_to_tab or browser_tabs action=attach/new first.`,
         false,
+        build_invalid_argument_details({
+          provided_fields: Object.keys(args).sort(),
+          recovery_hint:
+            "Attach to an existing tab with browser_tabs action='attach' or attach_to_tab, or create one with browser_tabs action='new'.",
+          recommended_next_tools: ["browser_tabs", "attach_to_tab", "list_available_tabs"],
+        }),
       );
     }
 
@@ -1257,16 +1528,198 @@ export class tool_router {
       throw new tool_error("LOCK_NOT_OWNED", `session no longer owns tab ${active_tab_id}`, false, {
         active_tab_id,
         agent_session_id,
+        recovery_hint: "Re-attach to the tab before retrying the browser_* tool.",
+        recommended_next_tools: ["list_available_tabs", "attach_to_tab", "browser_tabs"],
       });
     }
 
-    const result = await this.bridge_transport.call_tool(tool_name, args, agent_session_id, active_tab_id);
+    const normalized_args = this.normalize_tab_scoped_tool_args(tool_name, args);
+    const result = await this.bridge_transport.call_tool(tool_name, normalized_args, agent_session_id, active_tab_id);
 
     if (result && typeof result === "object") {
       return await this.persist_artifact_if_requested(tool_name, args, result as Record<string, unknown>);
     }
 
     return { result };
+  }
+
+  private normalize_tab_scoped_tool_args(tool_name: string, args: Record<string, unknown>): Record<string, unknown> {
+    if (tool_name === "browser_navigate") {
+      const normalized_args = { ...args };
+      if (typeof normalized_args.url === "string") {
+        normalized_args.url = normalized_args.url.trim();
+      }
+
+      if (typeof normalized_args.action === "undefined") {
+        if (typeof normalized_args.url === "string" && normalized_args.url.length > 0) {
+          normalized_args.action = "url";
+          return normalized_args;
+        }
+
+        throw new tool_error(
+          "INVALID_ARGUMENT",
+          "browser_navigate requires action, or url to imply action='url'",
+          false,
+          build_invalid_argument_details({
+            args,
+            recovery_hint: "Pass browser_navigate with url only, or use the canonical { action: 'url', url: 'https://example.com' } shape.",
+            canonical_example: {
+              action: "url",
+              url: "https://example.com",
+            },
+            expected_fields: ["action", "url"],
+          }),
+        );
+      }
+
+      if (normalized_args.action === "url") {
+        if (typeof normalized_args.url === "string" && normalized_args.url.length > 0) {
+          return normalized_args;
+        }
+
+        throw new tool_error(
+          "INVALID_ARGUMENT",
+          "browser_navigate action='url' requires url",
+          false,
+          build_invalid_argument_details({
+            args,
+            recovery_hint: "Pass browser_navigate with url only, or use the canonical { action: 'url', url: 'https://example.com' } shape.",
+            canonical_example: {
+              action: "url",
+              url: "https://example.com",
+            },
+            expected_fields: ["action", "url"],
+          }),
+        );
+      }
+
+      return normalized_args;
+    }
+
+    if (tool_name === "browser_network_requests") {
+      const normalized_args = { ...args };
+      const canonical_request_id =
+        typeof normalized_args.requestId === "string" ? normalized_args.requestId.trim() : "";
+      const alias_request_id =
+        typeof normalized_args.request_id === "string" ? normalized_args.request_id.trim() : "";
+
+      if (canonical_request_id.length > 0) {
+        normalized_args.requestId = canonical_request_id;
+      } else if (alias_request_id.length > 0) {
+        normalized_args.requestId = alias_request_id;
+      }
+
+      if (typeof normalized_args.request_id !== "undefined") {
+        delete normalized_args.request_id;
+      }
+
+      const action = typeof normalized_args.action === "string" ? normalized_args.action : "list";
+      if (
+        (action === "details" || action === "replay") &&
+        (typeof normalized_args.requestId !== "string" || normalized_args.requestId.length === 0)
+      ) {
+        throw new tool_error(
+          "INVALID_ARGUMENT",
+          `browser_network_requests action=${action} requires requestId`,
+          false,
+          build_invalid_argument_details({
+            args,
+            recovery_hint: "Call browser_network_requests action='list' first, then pass requestId or request_id from one returned row.",
+            canonical_example: {
+              action,
+              requestId: "12345.67",
+            },
+            expected_fields: ["action", "requestId"],
+            accepted_aliases: ["request_id"],
+          }),
+        );
+      }
+
+      return normalized_args;
+    }
+
+    return args;
+  }
+
+  private get_learn_browser_mcp_result(): Record<string, unknown> {
+    const markdown = this.render_prompt_text("learn_browser_mcp", {});
+    return {
+      title: "Learn Browser MCP",
+      markdown,
+      recommended_prompts: ["attach_and_observe", "network_debug_flow"],
+      recommended_first_tools: ["browser_tabs", "attach_to_tab", "browser_snapshot", "browser_lookup"],
+      common_mistakes: [
+        "browser_* tools require an attached tab first.",
+        "browser_tabs action='new' creates and immediately attaches a new tab for the current session.",
+        "browser_navigate accepts url-only input and defaults that to action='url'.",
+        "browser_network_requests uses requestId; request_id is accepted as an alias.",
+        "detach_from_tab can omit tab_id only when the session owns exactly one tab.",
+        "network capture only includes requests observed after attach and later navigation or reload.",
+      ],
+    };
+  }
+
+  private render_prompt_text(name: string, prompt_args: Record<string, unknown>): string {
+    if (name === "learn_browser_mcp") {
+      return [
+        "# Learn Browser MCP",
+        "",
+        "## Operating model",
+        "- This server multiplexes multiple MCP clients through one browser extension and enforces one lock owner per tab.",
+        "- Any `browser_*` tool requires an attached tab. Start with `browser_tabs { action: 'list' }` plus `browser_tabs { action: 'attach', index }`, or `browser_tabs { action: 'new', url }`.",
+        "- `browser_tabs { action: 'new' }` creates a tab and immediately attaches it for the current session.",
+        "- `browser_snapshot` is the preferred first read tool after attach; use screenshots when semantic output is insufficient.",
+        "",
+        "## Canonical workflows",
+        "1. Attach and observe: `browser_tabs { action: 'list' }` -> `browser_tabs { action: 'attach', index }` -> `browser_snapshot {}` -> `browser_lookup { text: '...' }`.",
+        "2. New tab: `browser_tabs { action: 'new', url: 'https://example.com' }` -> `browser_snapshot {}`.",
+        "3. Network debug: attach first -> `browser_navigate { action: 'reload' }` or `browser_navigate { url: '...' }` -> `browser_network_requests { action: 'list' }` -> `browser_network_requests { action: 'details', requestId: '...' }` -> optional replay.",
+        "",
+        "## Common mistakes",
+        "- `browser_navigate` with only `url` is valid and defaults to `action='url'`.",
+        "- `browser_network_requests` uses `requestId`; `request_id` is accepted as an alias.",
+        "- `detach_from_tab` can omit `tab_id` only when the session owns exactly one tab.",
+        "- Network capture starts after attach and later navigation or reload, not before.",
+      ].join("\n");
+    }
+
+    if (name === "attach_and_observe") {
+      return [
+        "Attach and observe workflow:",
+        "1. Call `browser_tabs { action: 'list' }` or `list_available_tabs {}`.",
+        "2. Choose a tab and call `browser_tabs { action: 'attach', index: ... }` or `attach_to_tab { tab_id: ... }`.",
+        "3. Call `browser_snapshot {}` first to read the page semantically.",
+        "4. If you need a specific target, call `browser_lookup { text: '...' }` and prefer `element_ref` when present.",
+        "5. Only after that should you use interaction or navigation tools.",
+      ].join("\n");
+    }
+
+    if (name === "network_debug_flow") {
+      const url_pattern =
+        typeof prompt_args.url_pattern === "string" && prompt_args.url_pattern.trim().length > 0
+          ? prompt_args.url_pattern.trim()
+          : "";
+      const safe_url_pattern = url_pattern.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+      const list_step =
+        url_pattern.length > 0
+          ? `browser_network_requests { action: 'list', urlPattern: '${safe_url_pattern}' }`
+          : "browser_network_requests { action: 'list' }";
+
+      return [
+        "Network debug workflow:",
+        "1. Ensure the tab is attached first.",
+        "2. Trigger capture with `browser_navigate { action: 'reload' }` or by navigating to the target page.",
+        `3. Call \`${list_step}\` to inspect captured request metadata.`,
+        "4. Pick a `requestId` from the list rows and call `browser_network_requests { action: 'details', requestId: '...' }`.",
+        "5. If needed, call `browser_network_requests { action: 'replay', requestId: '...' }`.",
+        "6. Remember that list mode is metadata-only; decoded bodies are exposed by details mode.",
+      ].join("\n");
+    }
+
+    throw new tool_error("INVALID_ARGUMENT", `unknown prompt: ${name}`, false, {
+      name,
+      recovery_hint: "Call prompts/list to discover the available guidance prompts.",
+    });
   }
 
   private async persist_artifact_if_requested(

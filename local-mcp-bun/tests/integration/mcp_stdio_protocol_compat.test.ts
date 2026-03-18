@@ -125,6 +125,9 @@ test("stdio initialize responds with MCP-compatible shape", async () => {
   expect(initialize_response.error).toBeUndefined();
   expect(initialize_response.result?.protocolVersion).toBe("2024-11-05");
   expect(initialize_response.result?.capabilities).toMatchObject({
+    prompts: {
+      listChanged: false,
+    },
     tools: {
       listChanged: false,
     },
@@ -134,8 +137,41 @@ test("stdio initialize responds with MCP-compatible shape", async () => {
     version: package_version,
   });
   expect(typeof initialize_response.result?.agent_session_id).toBe("string");
+  expect(String(initialize_response.result?.instructions ?? "")).toContain("learn_browser_mcp");
 
   server.send_notification("notifications/initialized");
+});
+
+test("prompts/list and prompts/get expose onboarding guidance", async () => {
+  const server = start_stdio_server();
+
+  await server.send_request("init-prompts-1", "initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: {
+      name: "prompt-test-client",
+      version: "0.0.1",
+    },
+  });
+
+  const prompts_list_response = await server.send_request("prompts-list-1", "prompts/list", {});
+  expect(prompts_list_response.error).toBeUndefined();
+  const prompts = (prompts_list_response.result?.prompts as Array<Record<string, unknown>>) ?? [];
+  expect(prompts.some((prompt) => prompt.name === "learn_browser_mcp")).toBe(true);
+  expect(prompts.some((prompt) => prompt.name === "attach_and_observe")).toBe(true);
+  expect(prompts.some((prompt) => prompt.name === "network_debug_flow")).toBe(true);
+
+  const prompt_get_response = await server.send_request("prompts-get-1", "prompts/get", {
+    name: "network_debug_flow",
+    arguments: {
+      url_pattern: "/api/items",
+    },
+  });
+  expect(prompt_get_response.error).toBeUndefined();
+  expect(String(prompt_get_response.result?.description ?? "")).toContain("network");
+  expect(Array.isArray(prompt_get_response.result?.messages)).toBe(true);
+  expect(String(prompt_get_response.result?.messages?.[0]?.content?.text ?? "")).toContain("/api/items");
+  expect(String(prompt_get_response.result?.messages?.[0]?.content?.text ?? "")).toContain("requestId");
 });
 
 test("tools/call works without explicit agent_session_id after initialize", async () => {
@@ -168,6 +204,34 @@ test("tools/call works without explicit agent_session_id after initialize", asyn
   expect(unknown_tool_response.error).toBeUndefined();
   expect(unknown_tool_response.result?.isError).toBe(true);
   expect(Array.isArray(unknown_tool_response.result?.content)).toBe(true);
+});
+
+test("learn_browser_mcp returns direct help text and structured guidance", async () => {
+  const server = start_stdio_server();
+
+  await server.send_request("init-help-1", "initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: {
+      name: "help-tool-test-client",
+      version: "0.0.1",
+    },
+  });
+
+  const help_response = await server.send_request("tool-help-1", "tools/call", {
+    name: "learn_browser_mcp",
+    arguments: {},
+  });
+
+  expect(help_response.error).toBeUndefined();
+  expect(help_response.result?.content?.[0]).toMatchObject({
+    type: "text",
+  });
+  expect(String(help_response.result?.content?.[0]?.text ?? "")).toContain("Learn Browser MCP");
+  expect(help_response.result?.structuredContent).toMatchObject({
+    title: "Learn Browser MCP",
+  });
+  expect(Array.isArray(help_response.result?.structuredContent?.recommended_prompts)).toBe(true);
 });
 
 test("tools/call returns MCP image content for browser_take_screenshot", async () => {

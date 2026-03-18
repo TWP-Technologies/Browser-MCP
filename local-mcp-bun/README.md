@@ -15,7 +15,20 @@ This project provides a local-only MCP server that multiplexes multiple agent se
 - One lock owner per `tab_id`.
 - Required tools: `list_available_tabs`, `attach_to_tab`, `detach_from_tab`.
 - Broad forwarded browser tool surface under `browser_*` names (lock-aware tab-scoped routing).
+- Built-in LLM onboarding via MCP prompts (`learn_browser_mcp`, `attach_and_observe`, `network_debug_flow`) and fallback `learn_browser_mcp` tool guidance.
 - Hard-gate test command: `bun run test:hard-gate`.
+
+## LLM Onboarding
+
+- If your MCP client surfaces prompts, start with:
+  - `prompts/get name=learn_browser_mcp`
+- If your client does not surface prompts well, call:
+  - `tools/call name=learn_browser_mcp`
+- Useful ergonomic behaviors:
+  - `browser_tabs { action: "new", url }` creates a tab and immediately attaches it for the current session.
+  - `browser_navigate` accepts `{ url: "https://example.com" }` and defaults it to `action="url"`.
+  - `browser_network_requests` accepts both `requestId` and `request_id`.
+  - `detach_from_tab` may omit `tab_id` only when the session owns exactly one tab.
 
 ## Run
 

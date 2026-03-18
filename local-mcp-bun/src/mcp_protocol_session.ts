@@ -112,6 +112,9 @@ export class mcp_protocol_session {
           result: {
             protocolVersion: protocol_version,
             capabilities: {
+              prompts: {
+                listChanged: false,
+              },
               tools: {
                 listChanged: false,
               },
@@ -119,7 +122,35 @@ export class mcp_protocol_session {
             serverInfo: server_info,
             protocol_version: local_protocol_version,
             agent_session_id: result.agent_session_id,
+            instructions: this.runtime.tool_router.get_initialize_instructions(),
           },
+        };
+      }
+
+      if (request.method === "prompts/list") {
+        return {
+          jsonrpc: "2.0",
+          id: request.id ?? null,
+          result: {
+            prompts: this.runtime.tool_router.list_prompts(),
+          },
+        };
+      }
+
+      if (request.method === "prompts/get") {
+        const prompt_name = request.params?.name;
+        const prompt_arguments =
+          request.params?.arguments && typeof request.params.arguments === "object"
+            ? (request.params.arguments as Record<string, unknown>)
+            : {};
+        if (typeof prompt_name !== "string" || prompt_name.length === 0) {
+          throw new tool_error("INVALID_ARGUMENT", "prompts/get requires name", false);
+        }
+
+        return {
+          jsonrpc: "2.0",
+          id: request.id ?? null,
+          result: this.runtime.tool_router.get_prompt(prompt_name, prompt_arguments),
         };
       }
 
@@ -264,6 +295,10 @@ export class mcp_protocol_session {
   }
 
   private to_mcp_tool_result(tool_name: string, result: Record<string, unknown>): Record<string, unknown> {
+    if (tool_name === "learn_browser_mcp") {
+      return this.to_mcp_help_tool_result(result);
+    }
+
     if (tool_name === "browser_take_screenshot") {
       const screenshot_result = this.to_mcp_screenshot_tool_result(result);
       if (screenshot_result) {
@@ -355,12 +390,35 @@ export class mcp_protocol_session {
     return match[1];
   }
 
-  private to_mcp_tool_error_result(error: tool_error): Record<string, unknown> {
+  private to_mcp_help_tool_result(result: Record<string, unknown>): Record<string, unknown> {
+    const markdown = typeof result.markdown === "string" ? result.markdown : JSON.stringify(result);
     return {
       content: [
         {
           type: "text",
-          text: error.message,
+          text: markdown,
+        },
+      ],
+      structuredContent: result,
+    };
+  }
+
+  private to_mcp_tool_error_result(error: tool_error): Record<string, unknown> {
+    const detail_text: string[] = [error.message];
+    const recovery_hint = typeof error.details?.recovery_hint === "string" ? error.details.recovery_hint : null;
+    if (recovery_hint) {
+      detail_text.push(`Hint: ${recovery_hint}`);
+    }
+
+    if (typeof error.details?.canonical_example !== "undefined") {
+      detail_text.push(`Example: ${JSON.stringify(error.details.canonical_example)}`);
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: detail_text.join("\n"),
         },
       ],
       structuredContent: error.to_payload(),
