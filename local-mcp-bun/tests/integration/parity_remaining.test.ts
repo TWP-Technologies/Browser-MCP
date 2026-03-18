@@ -102,11 +102,15 @@ test("observability parity tools expose filters, replay, and metrics", async () 
       method: "POST",
       resourceType: "fetch",
     });
-    const request = (network_list.requests as Array<Record<string, unknown>>)[0];
-    expect(request?.request_id).toBe("req-1");
-    expect(Object.hasOwn(request ?? {}, "response_body")).toBe(false);
-    expect(Object.hasOwn(request ?? {}, "response_body_base64")).toBe(false);
-    expect(Object.hasOwn(request ?? {}, "response_body_cached_at")).toBe(false);
+    const request = ((network_list.requests as Array<Record<string, unknown>>) ?? [])[0] ?? null;
+    expect(request).not.toBeNull();
+    if (!request) {
+      throw new Error("expected browser_network_requests action=list to return at least one request");
+    }
+    expect(request.request_id).toBe("req-1");
+    expect(Object.hasOwn(request, "response_body")).toBe(false);
+    expect(Object.hasOwn(request, "response_body_base64")).toBe(false);
+    expect(Object.hasOwn(request, "response_body_cached_at")).toBe(false);
 
     const network_details = await runtime.tool_router.call_tool(session_id, "browser_network_requests", {
       action: "details",
