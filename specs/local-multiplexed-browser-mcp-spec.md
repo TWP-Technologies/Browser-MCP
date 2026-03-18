@@ -18,7 +18,7 @@
 - Clean-break v2 API contract for local Bun implementation (no backward-compat guarantee with blueprint tool shapes).
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
 - Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
-- Behavioral Blueprint parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, optional stable `element_ref` chaining, and optional local artifact persistence.
+- Behavioral upstream parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, optional stable `element_ref` chaining, and optional local artifact persistence.
 - `element_ref` reuse is fail-closed: if follow-up resolution cannot prove it still targets the original node, the runtime MUST return `STALE_ELEMENT_REFERENCE` instead of replaying against a first-match selector.
 - `browser_snapshot` and `browser_lookup` SHOULD emit `element_ref` only for nodes with a replayably stable unique selector; callers MUST treat `element_ref` as optional.
 - `browser_network_requests action=list` MUST remain metadata-only; `action=details` MUST keep the nested `request` payload metadata-only while exposing any decoded response body only through the top-level detail fields. Response bodies SHOULD be fetched lazily by `action=details` and MAY be cached only within bounded in-memory limits.
