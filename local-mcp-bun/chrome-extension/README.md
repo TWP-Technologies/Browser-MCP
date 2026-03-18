@@ -43,4 +43,4 @@ If you edit popup UI logic, run the build command before reloading the unpacked 
 2. Confirm extension `bridge_url` is `ws://127.0.0.1:37777/extension`.
 3. Verify daemon health endpoint from the same host as Chrome:
    - `curl http://127.0.0.1:37778/health`
-4. If using a packaged extension zip, use release `v0.2.3` or newer. Earlier zips may fail service-worker registration due to missing module files imported by `background.js`.
+4. If using a packaged extension zip, use release `v0.3.0` or newer. Earlier zips may fail service-worker registration due to missing module files imported by `background.js`.

@@ -30,26 +30,26 @@ describe("resolve_daemon_spawn_target", () => {
 
   test("resolves compiled runtime to executable self command", () => {
     const target = resolve_daemon_spawn_target(
-      "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
-      ["bun", "/$bunfs/root/chrome-browser-mcp-v0.2.0-linux-x64"],
-      "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
+      "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
+      ["bun", "/$bunfs/root/chrome-browser-mcp-v0.3.0-linux-x64"],
+      "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
     );
 
     expect(target).toEqual({
-      command: "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
+      command: "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
       args: [],
     });
   });
 
   test("passes through runtime args for compiled runtime", () => {
     const target = resolve_daemon_spawn_target(
-      "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
-      ["bun", "/$bunfs/root/chrome-browser-mcp-v0.2.0-linux-x64", "--trace"],
-      "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
+      "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
+      ["bun", "/$bunfs/root/chrome-browser-mcp-v0.3.0-linux-x64", "--trace"],
+      "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
     );
 
     expect(target).toEqual({
-      command: "/tmp/chrome-browser-mcp-v0.2.0-linux-x64",
+      command: "/tmp/chrome-browser-mcp-v0.3.0-linux-x64",
       args: ["--trace"],
     });
   });
