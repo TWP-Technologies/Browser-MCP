@@ -653,9 +653,14 @@ test("extension bridge supports semantic observation, observability, and pdf exp
       requestId: request_id,
       jsonPath: "$.data.items[0].name",
     });
-    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body")).toBe(false);
-    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body_base64")).toBe(false);
-    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body_cached_at")).toBe(false);
+    const detailed_request = network_details.request as Record<string, unknown> | null;
+    expect(detailed_request).not.toBeNull();
+    if (!detailed_request) {
+      throw new Error("expected browser_network_requests action=details to return request metadata");
+    }
+    expect(Object.hasOwn(detailed_request, "response_body")).toBe(false);
+    expect(Object.hasOwn(detailed_request, "response_body_base64")).toBe(false);
+    expect(Object.hasOwn(detailed_request, "response_body_cached_at")).toBe(false);
     expect(network_details.json_path_result).toBe("Fíxture Café");
     expect(String(network_details.response_body_text ?? "")).toContain("Fíxture Café");
 
