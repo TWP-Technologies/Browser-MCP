@@ -7,7 +7,7 @@ const local_protocol_version = "local-mcp-bun-v2";
 
 export const server_info = {
   name: "local-mcp",
-  version: "0.3.0",
+  version: "0.4.0",
 } as const;
 
 interface mcp_protocol_session_options {
