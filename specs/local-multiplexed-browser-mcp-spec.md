@@ -25,7 +25,7 @@
 - `browser_network_requests action=list` MUST remain metadata-only; `action=details` MUST keep the nested `request` payload metadata-only while exposing any decoded response body only through the top-level detail fields. Response bodies SHOULD be fetched lazily by `action=details` and MAY be cached only within bounded in-memory limits.
 - The local browser contract SHOULD accept a narrow set of high-confidence LLM ergonomic aliases and defaults without becoming broadly permissive:
   - `browser_navigate` MAY infer `action='url'` when `url` is provided without `action`.
-  - `browser_network_requests` SHOULD accept `request_id` as an alias for `requestId`.
+  - `browser_network_requests` SHOULD accept `request_id` as an alias for `requestId`, and the router SHOULD canonicalize it to `requestId` before forwarding the call downstream.
   - `detach_from_tab` MAY infer `tab_id` only when the session owns exactly one tab; otherwise it MUST fail with a corrective `INVALID_ARGUMENT`.
 - Crash/restart recovery for client exits and extension restarts.
 - Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.

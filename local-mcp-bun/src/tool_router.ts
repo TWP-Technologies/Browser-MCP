@@ -29,6 +29,7 @@ interface close_all_sessions_result {
 
 interface invalid_argument_details_options {
   args?: Record<string, unknown>;
+  provided_fields?: string[];
   recovery_hint: string;
   canonical_example?: Record<string, unknown>;
   expected_fields?: string[];
@@ -89,6 +90,10 @@ function build_invalid_argument_details(options: invalid_argument_details_option
 
   if (options.args) {
     details.args = options.args;
+  }
+
+  if (options.provided_fields && options.provided_fields.length > 0) {
+    details.provided_fields = options.provided_fields;
   }
 
   if (options.canonical_example) {
@@ -756,7 +761,7 @@ export class tool_router {
     return [
       "This browser MCP multiplexes sessions through one extension and enforces one lock owner per tab.",
       "Use prompts/get name=learn_browser_mcp or tools/call learn_browser_mcp if the tool surface is unfamiliar.",
-      "Any browser_* tool requires an attached tab. Start with browser_tabs action='list' or action='new', then attach_to_tab or browser_tabs action='attach'.",
+      "Any browser_* tool requires an attached tab. Either list tabs and attach with browser_tabs action='attach' or attach_to_tab, or create a new tab with browser_tabs action='new', which attaches automatically.",
       "browser_network_requests only captures requests observed after attach and later navigation/reload.",
     ].join(" ");
   }
@@ -966,7 +971,32 @@ export class tool_router {
     const active_lock = this.tab_lock_manager.get_lock(input.tab_id);
 
     if (!active_lock) {
-      return { tab_id: input.tab_id, detached: true };
+      let state_changed = false;
+
+      try {
+        this.session_registry.mark_tab_released(agent_session_id, input.tab_id);
+        state_changed = true;
+      } catch {
+        // session may not currently own the tab
+      }
+
+      const active_tab_id = this.active_tab_by_session.get(agent_session_id);
+      if (active_tab_id === input.tab_id) {
+        this.active_tab_by_session.delete(agent_session_id);
+        state_changed = true;
+      }
+
+      if (state_changed) {
+        await this.publish_connections_snapshot("detach_from_tab");
+      }
+
+      return {
+        tab_id: input.tab_id,
+        detached: true,
+        debugger_attached: false,
+        owned_by_current_session: false,
+        recommended_next_tools: ["list_available_tabs", "attach_to_tab", "browser_tabs"],
+      };
     }
 
     if (active_lock.owner_agent_session_id !== agent_session_id) {
@@ -1055,7 +1085,7 @@ export class tool_router {
     const owned_tab_ids = [...this.session_registry.get_session(agent_session_id).owned_tab_ids].sort((left, right) => left - right);
 
     if (owned_tab_ids.length === 1) {
-      return { tab_id: owned_tab_ids[0] ?? 0 };
+      return { tab_id: owned_tab_ids[0]! };
     }
 
     if (owned_tab_ids.length === 0) {
@@ -1485,7 +1515,7 @@ export class tool_router {
         `${tool_name} requires an attached tab. Use attach_to_tab or browser_tabs action=attach/new first.`,
         false,
         build_invalid_argument_details({
-          args,
+          provided_fields: Object.keys(args).sort(),
           recovery_hint:
             "Attach to an existing tab with browser_tabs action='attach' or attach_to_tab, or create one with browser_tabs action='new'.",
           recommended_next_tools: ["browser_tabs", "attach_to_tab", "list_available_tabs"],
@@ -1516,10 +1546,13 @@ export class tool_router {
   private normalize_tab_scoped_tool_args(tool_name: string, args: Record<string, unknown>): Record<string, unknown> {
     if (tool_name === "browser_navigate") {
       const normalized_args = { ...args };
+      if (typeof normalized_args.url === "string") {
+        normalized_args.url = normalized_args.url.trim();
+      }
+
       if (typeof normalized_args.action === "undefined") {
-        if (typeof normalized_args.url === "string" && normalized_args.url.trim().length > 0) {
+        if (typeof normalized_args.url === "string" && normalized_args.url.length > 0) {
           normalized_args.action = "url";
-          normalized_args.url = normalized_args.url.trim();
           return normalized_args;
         }
 
@@ -1539,17 +1572,52 @@ export class tool_router {
         );
       }
 
+      if (normalized_args.action === "url") {
+        if (typeof normalized_args.url === "string" && normalized_args.url.length > 0) {
+          return normalized_args;
+        }
+
+        throw new tool_error(
+          "INVALID_ARGUMENT",
+          "browser_navigate action='url' requires url",
+          false,
+          build_invalid_argument_details({
+            args,
+            recovery_hint: "Pass browser_navigate with url only, or use the canonical { action: 'url', url: 'https://example.com' } shape.",
+            canonical_example: {
+              action: "url",
+              url: "https://example.com",
+            },
+            expected_fields: ["action", "url"],
+          }),
+        );
+      }
+
       return normalized_args;
     }
 
     if (tool_name === "browser_network_requests") {
       const normalized_args = { ...args };
-      if (typeof normalized_args.requestId === "undefined" && typeof normalized_args.request_id === "string") {
-        normalized_args.requestId = normalized_args.request_id;
+      const canonical_request_id =
+        typeof normalized_args.requestId === "string" ? normalized_args.requestId.trim() : "";
+      const alias_request_id =
+        typeof normalized_args.request_id === "string" ? normalized_args.request_id.trim() : "";
+
+      if (canonical_request_id.length > 0) {
+        normalized_args.requestId = canonical_request_id;
+      } else if (alias_request_id.length > 0) {
+        normalized_args.requestId = alias_request_id;
+      }
+
+      if (typeof normalized_args.request_id !== "undefined") {
+        delete normalized_args.request_id;
       }
 
       const action = typeof normalized_args.action === "string" ? normalized_args.action : "list";
-      if ((action === "details" || action === "replay") && typeof normalized_args.requestId !== "string") {
+      if (
+        (action === "details" || action === "replay") &&
+        (typeof normalized_args.requestId !== "string" || normalized_args.requestId.length === 0)
+      ) {
         throw new tool_error(
           "INVALID_ARGUMENT",
           `browser_network_requests action=${action} requires requestId`,
@@ -1631,9 +1699,10 @@ export class tool_router {
         typeof prompt_args.url_pattern === "string" && prompt_args.url_pattern.trim().length > 0
           ? prompt_args.url_pattern.trim()
           : "";
+      const safe_url_pattern = url_pattern.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
       const list_step =
         url_pattern.length > 0
-          ? `browser_network_requests { action: 'list', urlPattern: '${url_pattern}' }`
+          ? `browser_network_requests { action: 'list', urlPattern: '${safe_url_pattern}' }`
           : "browser_network_requests { action: 'list' }";
 
       return [

@@ -58,33 +58,36 @@ test("tool_router advertises onboarding and ergonomic browser guidance", async (
     bridge_port: test_bridge_port,
   });
 
-  const learn_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "learn_browser_mcp");
-  const navigate_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "browser_navigate") as
-    | {
-        description?: string;
-        inputSchema?: {
-          anyOf?: Array<{ required?: string[] }>;
-          properties?: Record<string, { description?: string }>;
-        };
-      }
-    | undefined;
-  const network_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "browser_network_requests") as
-    | {
-        description?: string;
-        inputSchema?: {
-          properties?: Record<string, { description?: string }>;
-        };
-      }
-    | undefined;
+  try {
+    const tools = runtime.tool_router.list_tools();
+    const learn_tool = tools.find((tool) => tool.name === "learn_browser_mcp");
+    const navigate_tool = tools.find((tool) => tool.name === "browser_navigate") as
+      | {
+          description?: string;
+          inputSchema?: {
+            anyOf?: Array<{ required?: string[] }>;
+            properties?: Record<string, { description?: string }>;
+          };
+        }
+      | undefined;
+    const network_tool = tools.find((tool) => tool.name === "browser_network_requests") as
+      | {
+          description?: string;
+          inputSchema?: {
+            properties?: Record<string, { description?: string }>;
+          };
+        }
+      | undefined;
 
-  expect(learn_tool).toBeDefined();
-  expect(String(navigate_tool?.description ?? "")).toContain("Canonical URL navigation");
-  expect(navigate_tool?.inputSchema?.anyOf).toEqual([{ required: ["action"] }, { required: ["url"] }]);
-  expect(String(navigate_tool?.inputSchema?.properties?.url?.description ?? "")).toContain("assumes action='url'");
-  expect(String(network_tool?.description ?? "")).toContain("Capture starts after attach");
-  expect(String(network_tool?.inputSchema?.properties?.request_id?.description ?? "")).toContain("Alias for requestId");
-
-  await runtime.stop();
+    expect(learn_tool).toBeDefined();
+    expect(String(navigate_tool?.description ?? "")).toContain("Canonical URL navigation");
+    expect(navigate_tool?.inputSchema?.anyOf).toEqual([{ required: ["action"] }, { required: ["url"] }]);
+    expect(String(navigate_tool?.inputSchema?.properties?.url?.description ?? "")).toContain("assumes action='url'");
+    expect(String(network_tool?.description ?? "")).toContain("Capture starts after attach");
+    expect(String(network_tool?.inputSchema?.properties?.request_id?.description ?? "")).toContain("Alias for requestId");
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("attach_to_tab enforces lock conflict and detach handoff", async () => {
@@ -286,6 +289,40 @@ test("bridge request envelope preserves agent_session_id across concurrent sessi
   expect(request_log.some((entry) => entry.agent_session_id.startsWith("system-router:"))).toBe(true);
 
   await runtime.stop();
+});
+
+test("browser_network_requests canonicalizes request_id before forwarding", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  try {
+    const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+    bridge.clear_request_log_for_tests();
+
+    const session_id = runtime.tool_router.open_session("network-alias-agent").agent_session_id;
+    await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+    await runtime.tool_router.call_tool(session_id, "browser_network_requests", {
+      action: "details",
+      request_id: "req-1",
+    });
+
+    const request_log = bridge.get_request_log_for_tests();
+    const network_call = [...request_log]
+      .reverse()
+      .find((entry) => entry.action === "call_tool" && entry.payload.tool_name === "browser_network_requests");
+
+    expect(network_call).toBeDefined();
+    expect(network_call?.payload.args).toMatchObject({
+      action: "details",
+      requestId: "req-1",
+    });
+    expect(Object.hasOwn(network_call?.payload.args ?? {}, "request_id")).toBe(false);
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("tool_router publishes connections snapshots with sessions and locks", async () => {
