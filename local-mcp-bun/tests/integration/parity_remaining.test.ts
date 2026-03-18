@@ -106,7 +106,11 @@ test("observability parity tools expose filters, replay, and metrics", async () 
       requestId: "req-1",
       jsonPath: "$.data.items[0].id",
     });
-    const detailed_request = network_details.request as Record<string, unknown>;
+    const detailed_request = network_details.request as Record<string, unknown> | null;
+    expect(detailed_request).not.toBeNull();
+    if (!detailed_request) {
+      throw new Error("expected browser_network_requests action=details to return request metadata");
+    }
     expect(Object.hasOwn(detailed_request, "response_body")).toBe(false);
     expect(Object.hasOwn(detailed_request, "response_body_base64")).toBe(false);
     expect(Object.hasOwn(detailed_request, "response_body_cached_at")).toBe(false);

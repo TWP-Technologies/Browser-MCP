@@ -562,11 +562,11 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     const snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
     expect(Array.isArray(snapshot.snapshot)).toBe(true);
     expect((snapshot.snapshot as Array<Record<string, unknown>>).some((node) => node.interactive === true)).toBe(true);
-    expect(
-      (snapshot.snapshot as Array<Record<string, unknown>>).some(
-        (node) => node.text === "Ambiguous action" && typeof node.element_ref === "undefined",
-      ),
-    ).toBe(true);
+    const ambiguous_snapshot_buttons = (snapshot.snapshot as Array<Record<string, unknown>>).filter(
+      (node) => node.tag === "button" && node.text === "Ambiguous action",
+    );
+    expect(ambiguous_snapshot_buttons.length).toBeGreaterThanOrEqual(2);
+    expect(ambiguous_snapshot_buttons.every((node) => typeof node.element_ref === "undefined")).toBe(true);
 
     const lookup_result = await runtime.tool_router.call_tool(agent_session_id, "browser_lookup", {
       text: "Primary action",
@@ -581,11 +581,11 @@ test("extension bridge supports semantic observation, observability, and pdf exp
       text: "Ambiguous action",
       limit: 20,
     });
-    expect(
-      (ambiguous_lookup_result.matches as Array<Record<string, unknown>>).some(
-        (match) => String(match.text ?? "").includes("Ambiguous action") && typeof match.element_ref === "undefined",
-      ),
-    ).toBe(true);
+    const ambiguous_lookup_buttons = (ambiguous_lookup_result.matches as Array<Record<string, unknown>>).filter(
+      (match) => match.tag === "button" && String(match.text ?? "").includes("Ambiguous action"),
+    );
+    expect(ambiguous_lookup_buttons.length).toBeGreaterThanOrEqual(2);
+    expect(ambiguous_lookup_buttons.every((match) => typeof match.element_ref === "undefined")).toBe(true);
 
     const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {
       text: "Example Domain",
