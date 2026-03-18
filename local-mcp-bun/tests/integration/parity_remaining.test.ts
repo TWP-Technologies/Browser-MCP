@@ -45,8 +45,17 @@ test("page-understanding parity tools return structured semantic results", async
       limit: 5,
     });
     const first_match = (lookup.matches as Array<Record<string, unknown>>)[0];
+    expect(first_match?.element_ref).toBeDefined();
     expect(first_match?.score).toBeDefined();
     expect(first_match?.bounds).toBeDefined();
+
+    const ambiguous_lookup = await runtime.tool_router.call_tool(session_id, "browser_lookup", {
+      text: "Ambiguous action",
+      limit: 5,
+    });
+    const ambiguous_match = (ambiguous_lookup.matches as Array<Record<string, unknown>>)[0];
+    expect(ambiguous_match?.selector).toBeDefined();
+    expect(ambiguous_match?.element_ref).toBeUndefined();
 
     const styles = await runtime.tool_router.call_tool(session_id, "browser_get_element_styles", {
       element_ref: first_interactive?.element_ref,
@@ -97,6 +106,10 @@ test("observability parity tools expose filters, replay, and metrics", async () 
       requestId: "req-1",
       jsonPath: "$.data.items[0].id",
     });
+    const detailed_request = network_details.request as Record<string, unknown>;
+    expect(Object.hasOwn(detailed_request, "response_body")).toBe(false);
+    expect(Object.hasOwn(detailed_request, "response_body_base64")).toBe(false);
+    expect(Object.hasOwn(detailed_request, "response_body_cached_at")).toBe(false);
     expect(network_details.json_path_result).toBe(1);
 
     const replay = await runtime.tool_router.call_tool(session_id, "browser_network_requests", {
