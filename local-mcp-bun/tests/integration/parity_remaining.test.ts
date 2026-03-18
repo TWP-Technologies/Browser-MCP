@@ -48,14 +48,18 @@ test("page-understanding parity tools return structured semantic results", async
     expect(first_match?.element_ref).toBeDefined();
     expect(first_match?.score).toBeDefined();
     expect(first_match?.bounds).toBeDefined();
+    expect(first_match?.tag).toBe("button");
 
     const ambiguous_lookup = await runtime.tool_router.call_tool(session_id, "browser_lookup", {
       text: "Ambiguous action",
       limit: 5,
     });
-    const ambiguous_match = (ambiguous_lookup.matches as Array<Record<string, unknown>>)[0];
-    expect(ambiguous_match?.selector).toBeDefined();
-    expect(ambiguous_match?.element_ref).toBeUndefined();
+    const ambiguous_matches = (ambiguous_lookup.matches as Array<Record<string, unknown>>).filter(
+      (match) => match.tag === "button",
+    );
+    expect(ambiguous_matches.length).toBeGreaterThan(0);
+    expect(ambiguous_matches.every((match) => typeof match.selector === "string")).toBe(true);
+    expect(ambiguous_matches.every((match) => typeof match.element_ref === "undefined")).toBe(true);
 
     const styles = await runtime.tool_router.call_tool(session_id, "browser_get_element_styles", {
       element_ref: first_interactive?.element_ref,

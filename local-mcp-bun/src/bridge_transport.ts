@@ -62,6 +62,7 @@ interface in_memory_element_ref_entry {
 interface in_memory_lookup_match {
   selector: string;
   unique_selector?: string;
+  tag?: string;
   role: string;
   name: string;
   visible: boolean;
@@ -568,6 +569,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         ? [
             {
               selector: "body div > div > div > div > div > button",
+              tag: "button",
               role: "button",
               name: "Ambiguous action",
               visible: true,
@@ -578,6 +580,7 @@ export class in_memory_bridge_transport implements bridge_transport {
             },
             {
               selector: "body div > div > div > div > div > button",
+              tag: "button",
               role: "button",
               name: "Ambiguous action",
               visible: true,
@@ -592,6 +595,7 @@ export class in_memory_bridge_transport implements bridge_transport {
               {
                 selector: "button.primary-action",
                 unique_selector: "button.primary-action",
+                tag: "button",
                 role: "button",
                 name: "Primary action",
                 visible: true,
@@ -607,8 +611,9 @@ export class in_memory_bridge_transport implements bridge_transport {
         matches: matches.map((match) => {
           const element_ref = this.maybe_register_element_ref(tab_id, {
             selector: match.selector,
-            unique_selector: match.unique_selector,
-            replayable: typeof match.unique_selector === "string" && match.unique_selector.length > 0,
+            ...(typeof match.unique_selector === "string" && match.unique_selector.length > 0
+              ? { unique_selector: match.unique_selector }
+              : {}),
           });
 
           return {
@@ -933,6 +938,9 @@ export class in_memory_bridge_transport implements bridge_transport {
         request_post_data: "{\"query\":\"items\"}",
         mime_type: "application/json",
         timestamp: 1_710_000_000_250,
+        response_body: "{\"data\":{\"items\":[{\"id\":1,\"name\":\"Widget\"}]}}",
+        response_body_base64: null,
+        response_body_cached_at: 1_710_000_000_500,
       };
       if (action === "clear") {
         return { tab_id, cleared: true };
