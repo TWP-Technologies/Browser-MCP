@@ -1002,7 +1002,7 @@ export class in_memory_bridge_transport implements bridge_transport {
         total: requests.length,
         offset,
         limit,
-        requests: requests.slice(offset, offset + limit),
+        requests: requests.slice(offset, offset + limit).map((request_row) => this.sanitize_network_request_row(request_row)),
       };
     }
 

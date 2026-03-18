@@ -96,7 +96,7 @@ const fixture_html = `
         <h2>Capture Target</h2>
         <p>Selector screenshot target.</p>
       </section>
-      <!-- Intentionally exceeds background.js build_path_selector's 6-segment cap so divergence stays above the emitted selector path. -->
+      <!-- Duplicate ids/data-testid/name are insufficient here because describe_selectors_for still falls back to build_path_selector; the shared truncated path is what keeps unique_selector unset. -->
       <section aria-label="Ambiguous actions">
         <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
         <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
