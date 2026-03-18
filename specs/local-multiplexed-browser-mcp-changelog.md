@@ -145,3 +145,9 @@
 ### Remaining High-Priority Work
 
 - None for current v1 scope tracked by `FR-001`..`FR-018`.
+
+## 2026-03-17 Follow-up contract hardening
+
+- Fixed `browser_network_requests action=details` so the nested `request` payload stays metadata-only and no longer leaks cached body fields (`response_body`, `response_body_base64`, `response_body_cached_at`).
+- Tightened `browser_snapshot` and `browser_lookup` so `element_ref` is emitted only when the runtime already has a replayably stable unique selector; ambiguous nodes now omit `element_ref` instead of handing back an immediately-stale handle.
+- Added integration and roundtrip E2E coverage for both behaviors.

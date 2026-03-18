@@ -96,6 +96,10 @@ const fixture_html = `
         <h2>Capture Target</h2>
         <p>Selector screenshot target.</p>
       </section>
+      <section aria-label="Ambiguous actions">
+        <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
+        <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
+      </section>
       <div class="spacer"></div>
       <footer>Bottom of fixture.</footer>
     </main>
@@ -558,14 +562,30 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     const snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
     expect(Array.isArray(snapshot.snapshot)).toBe(true);
     expect((snapshot.snapshot as Array<Record<string, unknown>>).some((node) => node.interactive === true)).toBe(true);
+    expect(
+      (snapshot.snapshot as Array<Record<string, unknown>>).some(
+        (node) => node.text === "Ambiguous action" && typeof node.element_ref === "undefined",
+      ),
+    ).toBe(true);
 
     const lookup_result = await runtime.tool_router.call_tool(agent_session_id, "browser_lookup", {
       text: "Primary action",
       limit: 5,
     });
     const lookup_match = (lookup_result.matches as Array<Record<string, unknown>>)[0];
+    expect(lookup_match?.element_ref).toBeDefined();
     expect(lookup_match?.selector).toBeDefined();
     expect(lookup_match?.bounds).toBeDefined();
+
+    const ambiguous_lookup_result = await runtime.tool_router.call_tool(agent_session_id, "browser_lookup", {
+      text: "Ambiguous action",
+      limit: 20,
+    });
+    expect(
+      (ambiguous_lookup_result.matches as Array<Record<string, unknown>>).some(
+        (match) => String(match.text ?? "").includes("Ambiguous action") && typeof match.element_ref === "undefined",
+      ),
+    ).toBe(true);
 
     const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {
       text: "Example Domain",
@@ -626,6 +646,9 @@ test("extension bridge supports semantic observation, observability, and pdf exp
       requestId: request_id,
       jsonPath: "$.data.items[0].name",
     });
+    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body")).toBe(false);
+    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body_base64")).toBe(false);
+    expect(Object.hasOwn((network_details.request as Record<string, unknown>) ?? {}, "response_body_cached_at")).toBe(false);
     expect(network_details.json_path_result).toBe("Fíxture Café");
     expect(String(network_details.response_body_text ?? "")).toContain("Fíxture Café");
 

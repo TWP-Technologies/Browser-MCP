@@ -244,6 +244,18 @@ function register_element_ref(tab_id, descriptor) {
   return element_ref;
 }
 
+function sanitize_network_request_row(request) {
+  if (!request || typeof request !== "object") {
+    return request;
+  }
+
+  const cloned = { ...request };
+  delete cloned.response_body;
+  delete cloned.response_body_base64;
+  delete cloned.response_body_cached_at;
+  return cloned;
+}
+
 function resolve_element_ref_entry(tab_id, element_ref) {
   const entry = element_refs_by_tab.get(tab_id)?.get(element_ref);
   if (!entry || entry.revision !== get_element_ref_revision(tab_id)) {
@@ -2568,18 +2580,25 @@ async function execute_browser_snapshot(tab_id) {
   });
 
   const snapshot = Array.isArray(page_snapshot?.nodes)
-    ? page_snapshot.nodes.map((node) => ({
-        ...node,
-        element_ref: register_element_ref(resolved_tab_id, {
-          selector: node.selector,
-          unique_selector: node.unique_selector,
-          tag: node.tag,
-          role: node.role,
-          name: node.name,
-          text_excerpt: node.text,
-          bounds: node.bounds,
-        }),
-      }))
+    ? page_snapshot.nodes.map((node) => {
+        const element_ref =
+          typeof node.unique_selector === "string" && node.unique_selector.length > 0
+            ? register_element_ref(resolved_tab_id, {
+                selector: node.selector,
+                unique_selector: node.unique_selector,
+                tag: node.tag,
+                role: node.role,
+                name: node.name,
+                text_excerpt: node.text,
+                bounds: node.bounds,
+              })
+            : undefined;
+
+        return {
+          ...node,
+          ...(element_ref ? { element_ref } : {}),
+        };
+      })
     : [];
 
   return {
@@ -3510,18 +3529,25 @@ async function execute_browser_lookup(args, tab_id) {
 
   return {
     tab_id: resolved_tab_id,
-    matches: matches.map((match) => ({
-      ...match,
-      element_ref: register_element_ref(resolved_tab_id, {
-        selector: match.selector,
-        unique_selector: match.unique_selector,
-        tag: match.tag,
-        role: match.role,
-        name: match.name,
-        text_excerpt: match.text,
-        bounds: match.bounds,
-      }),
-    })),
+    matches: matches.map((match) => {
+      const element_ref =
+        typeof match.unique_selector === "string" && match.unique_selector.length > 0
+          ? register_element_ref(resolved_tab_id, {
+              selector: match.selector,
+              unique_selector: match.unique_selector,
+              tag: match.tag,
+              role: match.role,
+              name: match.name,
+              text_excerpt: match.text,
+              bounds: match.bounds,
+            })
+          : undefined;
+
+      return {
+        ...match,
+        ...(element_ref ? { element_ref } : {}),
+      };
+    }),
   };
 }
 
@@ -3981,7 +4007,7 @@ async function execute_browser_network_requests(args, tab_id) {
 
     return {
       tab_id: resolved_tab_id,
-      request: details ?? null,
+      request: details ? sanitize_network_request_row(details) : null,
       response_body_text,
       body_available: body_state.body_available,
       body_cached: body_state.body_cached,
@@ -4072,13 +4098,7 @@ async function execute_browser_network_requests(args, tab_id) {
     total: rows.length,
     offset,
     limit,
-    requests: rows.slice(offset, offset + limit).map((row) => {
-      const cloned = { ...row };
-      delete cloned.response_body;
-      delete cloned.response_body_base64;
-      delete cloned.response_body_cached_at;
-      return cloned;
-    }),
+    requests: rows.slice(offset, offset + limit).map((row) => sanitize_network_request_row(row)),
   };
 }
 

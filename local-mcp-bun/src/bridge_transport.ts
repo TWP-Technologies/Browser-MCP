@@ -384,22 +384,22 @@ export class in_memory_bridge_transport implements bridge_transport {
 
       const tab = this.require_tab(tab_id, "browser_snapshot");
       this.reset_element_refs_for_tab(tab_id);
-      const body_ref = this.register_element_ref(tab_id, {
+      const body_ref = this.maybe_register_element_ref(tab_id, {
         selector: "body",
         unique_selector: "body",
         replayable: true,
       });
-      const heading_ref = this.register_element_ref(tab_id, {
+      const heading_ref = this.maybe_register_element_ref(tab_id, {
         selector: "main h1",
         unique_selector: "main h1",
         replayable: true,
       });
-      const button_ref = this.register_element_ref(tab_id, {
+      const button_ref = this.maybe_register_element_ref(tab_id, {
         selector: "button.primary-action",
         unique_selector: "button.primary-action",
         replayable: true,
       });
-      const link_ref = this.register_element_ref(tab_id, {
+      const link_ref = this.maybe_register_element_ref(tab_id, {
         selector: "a.primary-link",
         unique_selector: "a.primary-link",
         replayable: true,
@@ -423,7 +423,7 @@ export class in_memory_bridge_transport implements bridge_transport {
             name: "Synthetic document",
             text: "In-memory snapshot root",
             selector: "body",
-            element_ref: body_ref,
+            ...(body_ref ? { element_ref: body_ref } : {}),
             visible: true,
             interactive: false,
             depth: 0,
@@ -435,7 +435,7 @@ export class in_memory_bridge_transport implements bridge_transport {
             name: "Synthetic heading",
             text: "In-memory parity fixture",
             selector: "main h1",
-            element_ref: heading_ref,
+            ...(heading_ref ? { element_ref: heading_ref } : {}),
             visible: true,
             interactive: false,
             depth: 2,
@@ -447,7 +447,7 @@ export class in_memory_bridge_transport implements bridge_transport {
             name: "Primary action",
             text: "Continue",
             selector: "button.primary-action",
-            element_ref: button_ref,
+            ...(button_ref ? { element_ref: button_ref } : {}),
             visible: true,
             interactive: true,
             depth: 2,
@@ -460,7 +460,7 @@ export class in_memory_bridge_transport implements bridge_transport {
             name: "Primary link",
             text: "Open synthetic link",
             selector: "a.primary-link",
-            element_ref: link_ref,
+            ...(link_ref ? { element_ref: link_ref } : {}),
             visible: true,
             interactive: true,
             depth: 2,
@@ -546,19 +546,35 @@ export class in_memory_bridge_transport implements bridge_transport {
 
       this.require_tab(tab_id, "browser_lookup");
       const text = typeof args.text === "string" ? args.text : "";
-      const selector = "button.primary-action";
-      const element_ref = this.register_element_ref(tab_id, {
-        selector,
-        unique_selector: selector,
-        replayable: true,
-      });
-      return {
-        tab_id,
-        matches: text.length
+      const normalized_text = text.toLowerCase();
+      const matches = normalized_text.includes("ambiguous")
+        ? [
+            {
+              selector: "body div > div > div > div > div > button",
+              role: "button",
+              name: "Ambiguous action",
+              visible: true,
+              interactive: true,
+              text: "Ambiguous action",
+              score: 0.88,
+              bounds: { x: 48, y: 240, width: 160, height: 40 },
+            },
+            {
+              selector: "body div > div > div > div > div > button",
+              role: "button",
+              name: "Ambiguous action",
+              visible: true,
+              interactive: true,
+              text: "Ambiguous action duplicate",
+              score: 0.87,
+              bounds: { x: 48, y: 300, width: 160, height: 40 },
+            },
+          ]
+        : text.length
           ? [
               {
-                selector,
-                element_ref,
+                selector: "button.primary-action",
+                unique_selector: "button.primary-action",
                 role: "button",
                 name: "Primary action",
                 visible: true,
@@ -568,7 +584,21 @@ export class in_memory_bridge_transport implements bridge_transport {
                 bounds: { x: 48, y: 140, width: 160, height: 40 },
               },
             ]
-          : [],
+          : [];
+      return {
+        tab_id,
+        matches: matches.map((match) => {
+          const element_ref = this.maybe_register_element_ref(tab_id, {
+            selector: match.selector,
+            unique_selector: match.unique_selector,
+            replayable: typeof match.unique_selector === "string" && match.unique_selector.length > 0,
+          });
+
+          return {
+            ...match,
+            ...(element_ref ? { element_ref } : {}),
+          };
+        }),
       };
     }
 
@@ -898,7 +928,7 @@ export class in_memory_bridge_transport implements bridge_transport {
 
         return {
           tab_id,
-          request,
+          request: this.sanitize_network_request_row(request),
           response_body_text: "{\"data\":{\"items\":[{\"id\":1,\"name\":\"Widget\"}]}}",
           body_available: true,
           body_cached: false,
@@ -1155,6 +1185,26 @@ export class in_memory_bridge_transport implements bridge_transport {
         : descriptor,
     );
     return element_ref;
+  }
+
+  private maybe_register_element_ref(tab_id: number, descriptor: in_memory_element_ref_entry): string | undefined {
+    if (descriptor.replayable === false) {
+      return undefined;
+    }
+
+    if (typeof descriptor.unique_selector !== "string" || descriptor.unique_selector.length === 0) {
+      return undefined;
+    }
+
+    return this.register_element_ref(tab_id, descriptor);
+  }
+
+  private sanitize_network_request_row(request: Record<string, unknown>): Record<string, unknown> {
+    const cloned = { ...request };
+    delete cloned.response_body;
+    delete cloned.response_body_base64;
+    delete cloned.response_body_cached_at;
+    return cloned;
   }
 
   private resolve_selector_from_args_optional(tab_id: number, args: Record<string, unknown>): string | undefined {
