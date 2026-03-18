@@ -96,6 +96,7 @@ const fixture_html = `
         <h2>Capture Target</h2>
         <p>Selector screenshot target.</p>
       </section>
+      <!-- Intentionally exceeds background.js build_path_selector's 6-segment cap so divergence stays above the emitted selector path. -->
       <section aria-label="Ambiguous actions">
         <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
         <div><div><div><div><div><div><button type="button">Ambiguous action</button></div></div></div></div></div></div>
@@ -566,6 +567,9 @@ test("extension bridge supports semantic observation, observability, and pdf exp
       (node) => node.tag === "button" && node.text === "Ambiguous action",
     );
     expect(ambiguous_snapshot_buttons.length).toBeGreaterThanOrEqual(2);
+    expect(
+      ambiguous_snapshot_buttons.every((node) => node.selector === "body div > div > div > div > div > button"),
+    ).toBe(true);
     expect(ambiguous_snapshot_buttons.every((node) => typeof node.element_ref === "undefined")).toBe(true);
 
     const lookup_result = await runtime.tool_router.call_tool(agent_session_id, "browser_lookup", {
@@ -585,6 +589,9 @@ test("extension bridge supports semantic observation, observability, and pdf exp
       (match) => match.tag === "button" && String(match.text ?? "").includes("Ambiguous action"),
     );
     expect(ambiguous_lookup_buttons.length).toBeGreaterThanOrEqual(2);
+    expect(
+      ambiguous_lookup_buttons.every((match) => match.selector === "body div > div > div > div > div > button"),
+    ).toBe(true);
     expect(ambiguous_lookup_buttons.every((match) => typeof match.element_ref === "undefined")).toBe(true);
 
     const verify_result = await runtime.tool_router.call_tool(agent_session_id, "browser_verify_text_visible", {

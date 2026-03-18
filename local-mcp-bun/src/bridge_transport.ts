@@ -59,6 +59,23 @@ interface in_memory_element_ref_entry {
   replayable?: boolean;
 }
 
+interface in_memory_lookup_match {
+  selector: string;
+  unique_selector?: string;
+  role: string;
+  name: string;
+  visible: boolean;
+  interactive: boolean;
+  text: string;
+  score: number;
+  bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+}
+
 export class in_memory_bridge_transport implements bridge_transport {
   private state: bridge_state;
   private readonly tabs_by_id: Map<number, tab_snapshot>;
@@ -547,7 +564,7 @@ export class in_memory_bridge_transport implements bridge_transport {
       this.require_tab(tab_id, "browser_lookup");
       const text = typeof args.text === "string" ? args.text : "";
       const normalized_text = text.toLowerCase();
-      const matches = normalized_text.includes("ambiguous")
+      const matches: in_memory_lookup_match[] = normalized_text.includes("ambiguous")
         ? [
             {
               selector: "body div > div > div > div > div > button",
