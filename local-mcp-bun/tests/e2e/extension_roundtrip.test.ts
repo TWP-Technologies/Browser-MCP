@@ -559,6 +559,9 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     });
 
     expect(attach_result.action).toBe("attach");
+    expect(attach_result.debugger_attached).toBe(true);
+    expect(attach_result.owned_by_current_session).toBe(true);
+    expect(Array.isArray(attach_result.recommended_next_tools)).toBe(true);
 
     const snapshot = await runtime.tool_router.call_tool(agent_session_id, "browser_snapshot", {});
     expect(Array.isArray(snapshot.snapshot)).toBe(true);
@@ -599,6 +602,16 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     });
 
     expect(verify_result.visible).toBe(true);
+
+    const implicit_navigate_result = await runtime.tool_router.call_tool(agent_session_id, "browser_navigate", {
+      url: `${fixture_url}#capture-target`,
+    });
+    expect(implicit_navigate_result.action).toBe("url");
+
+    const hash_result = await runtime.tool_router.call_tool(agent_session_id, "browser_evaluate", {
+      expression: "window.location.hash",
+    });
+    expect(hash_result.value).toBe("#capture-target");
 
     await runtime.tool_router.call_tool(agent_session_id, "browser_navigate", {
       action: "reload",
@@ -650,7 +663,7 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
     const network_details = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "details",
-      requestId: request_id,
+      request_id,
       jsonPath: "$.data.items[0].name",
     });
     const detailed_request = network_details.request as Record<string, unknown> | null;
@@ -666,7 +679,7 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
     const replay_result = await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "replay",
-      requestId: request_id,
+      request_id,
     });
     expect(replay_result.replayed).toBe(true);
 
@@ -682,6 +695,11 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     expect(pdf_result.path).toBe(pdf_output_path);
     expect(existsSync(pdf_output_path)).toBe(true);
     expect(readFileSync(pdf_output_path).byteLength).toBeGreaterThan(0);
+
+    const detach_result = await runtime.tool_router.call_tool(agent_session_id, "detach_from_tab", {});
+    expect(detach_result.detached).toBe(true);
+    expect(detach_result.debugger_attached).toBe(false);
+    expect(detach_result.owned_by_current_session).toBe(false);
   } finally {
     rmSync(output_dir, { recursive: true, force: true });
     await runtime.tool_router.close_session(agent_session_id).catch(() => {

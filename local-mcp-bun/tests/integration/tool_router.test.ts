@@ -51,6 +51,42 @@ test("tool_router advertises browser_evaluate input requirements", async () => {
   await runtime.stop();
 });
 
+test("tool_router advertises onboarding and ergonomic browser guidance", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const learn_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "learn_browser_mcp");
+  const navigate_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "browser_navigate") as
+    | {
+        description?: string;
+        inputSchema?: {
+          anyOf?: Array<{ required?: string[] }>;
+          properties?: Record<string, { description?: string }>;
+        };
+      }
+    | undefined;
+  const network_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "browser_network_requests") as
+    | {
+        description?: string;
+        inputSchema?: {
+          properties?: Record<string, { description?: string }>;
+        };
+      }
+    | undefined;
+
+  expect(learn_tool).toBeDefined();
+  expect(String(navigate_tool?.description ?? "")).toContain("Canonical URL navigation");
+  expect(navigate_tool?.inputSchema?.anyOf).toEqual([{ required: ["action"] }, { required: ["url"] }]);
+  expect(String(navigate_tool?.inputSchema?.properties?.url?.description ?? "")).toContain("assumes action='url'");
+  expect(String(network_tool?.description ?? "")).toContain("Capture starts after attach");
+  expect(String(network_tool?.inputSchema?.properties?.request_id?.description ?? "")).toContain("Alias for requestId");
+
+  await runtime.stop();
+});
+
 test("attach_to_tab enforces lock conflict and detach handoff", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",

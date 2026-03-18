@@ -19,9 +19,14 @@
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
 - Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
 - Behavioral upstream parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, optional stable `element_ref` chaining, and optional local artifact persistence.
+- The server SHOULD expose first-class onboarding guidance for LLM clients through MCP prompts and a fallback learn/help tool, so clients can discover canonical browser workflows without external documentation.
 - `element_ref` reuse is fail-closed: if follow-up resolution cannot prove it still targets the original node, the runtime MUST return `STALE_ELEMENT_REFERENCE` instead of replaying against a first-match selector.
 - `browser_snapshot` and `browser_lookup` SHOULD emit `element_ref` only for nodes with a replayably stable unique selector; callers MUST treat `element_ref` as optional.
 - `browser_network_requests action=list` MUST remain metadata-only; `action=details` MUST keep the nested `request` payload metadata-only while exposing any decoded response body only through the top-level detail fields. Response bodies SHOULD be fetched lazily by `action=details` and MAY be cached only within bounded in-memory limits.
+- The local browser contract SHOULD accept a narrow set of high-confidence LLM ergonomic aliases and defaults without becoming broadly permissive:
+  - `browser_navigate` MAY infer `action='url'` when `url` is provided without `action`.
+  - `browser_network_requests` SHOULD accept `request_id` as an alias for `requestId`.
+  - `detach_from_tab` MAY infer `tab_id` only when the session owns exactly one tab; otherwise it MUST fail with a corrective `INVALID_ARGUMENT`.
 - Crash/restart recovery for client exits and extension restarts.
 - Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.
 - Co-located repository layout for Bun server and custom extension in a single implementation tree.

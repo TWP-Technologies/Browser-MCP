@@ -142,6 +142,124 @@ test("observability parity tools expose filters, replay, and metrics", async () 
   }
 });
 
+test("llm-oriented ergonomics accept narrow aliases and defaulted shapes", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "llm-ergonomics");
+
+  try {
+    const navigate = await runtime.tool_router.call_tool(session_id, "browser_navigate", {
+      url: "https://example.test/implicit-url",
+    });
+    expect(navigate.action).toBe("url");
+    expect(navigate.url).toBe("https://example.test/implicit-url");
+
+    const network_details = await runtime.tool_router.call_tool(session_id, "browser_network_requests", {
+      action: "details",
+      request_id: "req-1",
+      jsonPath: "$.data.items[0].id",
+    });
+    expect((network_details.request as Record<string, unknown> | null)?.request_id).toBe("req-1");
+    expect(network_details.json_path_result).toBe(1);
+
+    const detach = await runtime.tool_router.call_tool(session_id, "detach_from_tab", {});
+    expect(detach.detached).toBe(true);
+    expect(detach.debugger_attached).toBe(false);
+    expect(detach.owned_by_current_session).toBe(false);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("detach_from_tab without tab_id fails clearly when the session owns multiple tabs", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "llm-detach-ambiguity");
+
+  try {
+    const new_tab_result = await runtime.tool_router.call_tool(session_id, "browser_tabs", {
+      action: "new",
+      url: "https://example.test/second",
+    });
+    expect(new_tab_result.attached).toBe(true);
+
+    await runtime.tool_router.call_tool(session_id, "detach_from_tab", {});
+    throw new Error("expected detach_from_tab to reject ambiguous ownership");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("owns multiple tabs");
+    expect(Array.isArray((error as tool_error).details?.owned_tab_ids)).toBe(true);
+    expect((error as tool_error).details?.recovery_hint).toBeDefined();
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("detach_from_tab without tab_id fails clearly when the session owns zero tabs", async () => {
+  const runtime = create_runtime();
+  const session_id = runtime.tool_router.open_session("llm-detach-empty").agent_session_id;
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "detach_from_tab", {});
+    throw new Error("expected detach_from_tab to reject missing ownership context");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("requires tab_id");
+    expect((error as tool_error).details?.recovery_hint).toBeDefined();
+    expect((error as tool_error).details?.recommended_next_tools).toEqual([
+      "list_available_tabs",
+      "attach_to_tab",
+      "browser_tabs",
+    ]);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("browser_network_requests details without request id returns corrective guidance", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "llm-network-missing-id");
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_network_requests", {
+      action: "details",
+    });
+    throw new Error("expected details without requestId to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("requires requestId");
+    expect((error as tool_error).details?.canonical_example).toEqual({
+      action: "details",
+      requestId: "12345.67",
+    });
+    expect((error as tool_error).details?.accepted_aliases).toEqual(["request_id"]);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("browser_navigate without action or url returns corrective guidance", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "llm-navigate-missing-shape");
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_navigate", {});
+    throw new Error("expected browser_navigate without action or url to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("requires action");
+    expect((error as tool_error).details?.canonical_example).toEqual({
+      action: "url",
+      url: "https://example.com",
+    });
+    expect((error as tool_error).details?.expected_fields).toEqual(["action", "url"]);
+  } finally {
+    await runtime.stop();
+  }
+});
+
 test("browser_take_screenshot persists image artifacts when path is requested", async () => {
   const runtime = create_runtime();
   const session_id = await open_attached_session(runtime, "screenshot-path");
