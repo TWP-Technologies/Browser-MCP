@@ -565,7 +565,7 @@ export class in_memory_bridge_transport implements bridge_transport {
       this.require_tab(tab_id, "browser_lookup");
       const text = typeof args.text === "string" ? args.text : "";
       const normalized_text = text.toLowerCase();
-      const matches: in_memory_lookup_match[] = normalized_text.includes("ambiguous")
+      const matches: in_memory_lookup_match[] = normalized_text === "ambiguous action"
         ? [
             {
               selector: "body div > div > div > div > div > button",
