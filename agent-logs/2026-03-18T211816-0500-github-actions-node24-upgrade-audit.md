@@ -3,6 +3,7 @@
 - Repository: Browser-MCP
 - Working branch: `trunk`
 - Base revision used during session: `Browser-MCP: trunk @ ee93c31`
+- Landed revision: `Browser-MCP: trunk @ 33290ea`
 - External run inspected: `TWP-Technologies/Browser-MCP` Actions run `23276361345`
 
 ## Summary
@@ -29,9 +30,14 @@ Implemented:
 - Parsed both workflow files successfully with Ruby YAML loading
 - Verified local `gh release create` and `gh release upload` syntax from CLI help
 - Reviewed workflow diff after edits
+- Committed and pushed `33290ea` with message `ci(actions): move workflows to node24-compatible tooling`
+- Confirmed clean reruns with no annotation block in `gh run view --verbose`:
+  - CI push run `23279694587`
+  - Release workflow_dispatch run `23279701418`
 
 ## Relevant recent commits
 
+- `33290ea` ci(actions): move workflows to node24-compatible tooling
 - `ee93c31` Merge pull request #9 from TWP-Technologies/03-18-refactor_mcp_centralize_prompt_catalog_and_bump_to_0.4.0
 - `97b1eeb` test(mcp): narrow prompt result typing
 - `111c3d5` Merge pull request #8 from TWP-Technologies/03-18-feat_mcp_add_llm_onboarding_prompts_and_ergonomic_defaults
