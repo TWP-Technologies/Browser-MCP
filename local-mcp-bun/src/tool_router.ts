@@ -38,6 +38,18 @@ interface invalid_argument_details_options {
   recommended_next_tools?: string[];
 }
 
+interface prompt_argument_definition {
+  name: string;
+  description: string;
+  required: boolean;
+}
+
+interface prompt_definition {
+  description: string;
+  arguments?: prompt_argument_definition[];
+  render: (prompt_args: Record<string, unknown>) => string;
+}
+
 const passthrough_tools = [
   "browser_navigate",
   "browser_interact",
@@ -64,6 +76,89 @@ const passthrough_tools = [
 const system_agent_session_id = "system-router";
 const artifact_root = resolve(process.cwd());
 const artifact_root_real = realpathSync(artifact_root);
+
+function render_learn_browser_mcp_prompt(_prompt_args: Record<string, unknown>): string {
+  return [
+    "# Learn Browser MCP",
+    "",
+    "## Operating model",
+    "- This server multiplexes multiple MCP clients through one browser extension and enforces one lock owner per tab.",
+    "- Any `browser_*` tool requires an attached tab. Start with `browser_tabs { action: 'list' }` plus `browser_tabs { action: 'attach', index }`, or `browser_tabs { action: 'new', url }`.",
+    "- `browser_tabs { action: 'new' }` creates a tab and immediately attaches it for the current session.",
+    "- `browser_snapshot` is the preferred first read tool after attach; use screenshots when semantic output is insufficient.",
+    "",
+    "## Canonical workflows",
+    "1. Attach and observe: `browser_tabs { action: 'list' }` -> `browser_tabs { action: 'attach', index }` -> `browser_snapshot {}` -> `browser_lookup { text: '...' }`.",
+    "2. New tab: `browser_tabs { action: 'new', url: 'https://example.com' }` -> `browser_snapshot {}`.",
+    "3. Network debug: attach first -> `browser_navigate { action: 'reload' }` or `browser_navigate { url: '...' }` -> `browser_network_requests { action: 'list' }` -> `browser_network_requests { action: 'details', requestId: '...' }` -> optional replay.",
+    "",
+    "## Common mistakes",
+    "- `browser_navigate` with only `url` is valid and defaults to `action='url'`.",
+    "- `browser_network_requests` uses `requestId`; `request_id` is accepted as an alias.",
+    "- `detach_from_tab` can omit `tab_id` only when the session owns exactly one tab.",
+    "- Network capture starts after attach and later navigation or reload, not before.",
+  ].join("\n");
+}
+
+function render_attach_and_observe_prompt(_prompt_args: Record<string, unknown>): string {
+  return [
+    "Attach and observe workflow:",
+    "1. Call `browser_tabs { action: 'list' }` or `list_available_tabs {}`.",
+    "2. Choose a tab and call `browser_tabs { action: 'attach', index: ... }` or `attach_to_tab { tab_id: ... }`.",
+    "3. Call `browser_snapshot {}` first to read the page semantically.",
+    "4. If you need a specific target, call `browser_lookup { text: '...' }` and prefer `element_ref` when present.",
+    "5. Only after that should you use interaction or navigation tools.",
+  ].join("\n");
+}
+
+function render_network_debug_flow_prompt(prompt_args: Record<string, unknown>): string {
+  const url_pattern =
+    typeof prompt_args.url_pattern === "string" && prompt_args.url_pattern.trim().length > 0
+      ? prompt_args.url_pattern.trim()
+      : "";
+  const safe_url_pattern = url_pattern
+    .replaceAll("\\", "\\\\")
+    .replaceAll("'", "\\'")
+    .replaceAll("`", "\\`")
+    .replaceAll("\n", " ")
+    .replaceAll("\r", "");
+  const list_step =
+    url_pattern.length > 0
+      ? `browser_network_requests { action: 'list', urlPattern: '${safe_url_pattern}' }`
+      : "browser_network_requests { action: 'list' }";
+
+  return [
+    "Network debug workflow:",
+    "1. Ensure the tab is attached first.",
+    "2. Trigger capture with `browser_navigate { action: 'reload' }` or by navigating to the target page.",
+    `3. Call \`${list_step}\` to inspect captured request metadata.`,
+    "4. Pick a `requestId` from the list rows and call `browser_network_requests { action: 'details', requestId: '...' }`.",
+    "5. If needed, call `browser_network_requests { action: 'replay', requestId: '...' }`.",
+    "6. Remember that list mode is metadata-only; decoded bodies are exposed by details mode.",
+  ].join("\n");
+}
+
+const prompt_catalog = {
+  learn_browser_mcp: {
+    description: "Guided overview of the Browser MCP operating model, workflows, and common mistakes.",
+    render: render_learn_browser_mcp_prompt,
+  },
+  attach_and_observe: {
+    description: "Recommended first workflow for finding a tab, attaching, and observing page state safely.",
+    render: render_attach_and_observe_prompt,
+  },
+  network_debug_flow: {
+    description: "Recommended workflow for capturing, inspecting, and replaying network requests on an attached tab.",
+    arguments: [
+      {
+        name: "url_pattern",
+        description: "Optional urlPattern filter to use with browser_network_requests action='list'.",
+        required: false,
+      },
+    ],
+    render: render_network_debug_flow_prompt,
+  },
+} satisfies Record<string, prompt_definition>;
 
 function is_within_root(root_path: string, candidate_path: string): boolean {
   const relative_path = relative(root_path, candidate_path);
@@ -767,65 +862,46 @@ export class tool_router {
   }
 
   public list_prompts(): Array<Record<string, unknown>> {
-    return [
-      {
-        name: "learn_browser_mcp",
-        description: "Guided overview of the Browser MCP operating model, workflows, and common mistakes.",
-      },
-      {
-        name: "attach_and_observe",
-        description: "Recommended first workflow for finding a tab, attaching, and observing page state safely.",
-      },
-      {
-        name: "network_debug_flow",
-        description: "Recommended workflow for capturing, inspecting, and replaying network requests on an attached tab.",
-        arguments: [
-          {
-            name: "url_pattern",
-            description: "Optional urlPattern filter to use with browser_network_requests action='list'.",
-            required: false,
-          },
-        ],
-      },
-    ];
+    return Object.entries(prompt_catalog).map(([name, prompt_definition]) => {
+      const prompt_record: Record<string, unknown> = {
+        name,
+        description: prompt_definition.description,
+      };
+
+      if (prompt_definition.arguments) {
+        prompt_record.arguments = prompt_definition.arguments;
+      }
+
+      return prompt_record;
+    });
   }
 
   public get_prompt(name: string, prompt_args: Record<string, unknown> = {}): Record<string, unknown> {
+    const prompt_catalog_by_name = prompt_catalog as Record<string, prompt_definition | undefined>;
+    const prompt_definition = Object.prototype.hasOwnProperty.call(prompt_catalog, name)
+      ? prompt_catalog_by_name[name]
+      : undefined;
+    if (!prompt_definition) {
+      throw new tool_error("INVALID_ARGUMENT", `unknown prompt: ${name}`, false, {
+        name,
+        recovery_hint: "Call prompts/list to discover the available guidance prompts.",
+      });
+    }
+
     const messages = [
       {
         role: "user",
         content: {
           type: "text",
-          text: this.render_prompt_text(name, prompt_args),
+          text: prompt_definition.render(prompt_args),
         },
       },
     ];
 
-    if (name === "learn_browser_mcp") {
-      return {
-        description: "Guided overview of the Browser MCP operating model, workflows, and common mistakes.",
-        messages,
-      };
-    }
-
-    if (name === "attach_and_observe") {
-      return {
-        description: "Recommended first workflow for finding a tab, attaching, and observing page state safely.",
-        messages,
-      };
-    }
-
-    if (name === "network_debug_flow") {
-      return {
-        description: "Recommended workflow for capturing, inspecting, and replaying network requests on an attached tab.",
-        messages,
-      };
-    }
-
-    throw new tool_error("INVALID_ARGUMENT", `unknown prompt: ${name}`, false, {
-      name,
-      recovery_hint: "Call prompts/list to discover the available guidance prompts.",
-    });
+    return {
+      description: prompt_definition.description,
+      messages,
+    };
   }
 
   public async reconcile_locks_with_bridge(reason: string): Promise<void> {
@@ -1642,7 +1718,7 @@ export class tool_router {
   }
 
   private get_learn_browser_mcp_result(): Record<string, unknown> {
-    const markdown = this.render_prompt_text("learn_browser_mcp", {});
+    const markdown = prompt_catalog.learn_browser_mcp.render({});
     return {
       title: "Learn Browser MCP",
       markdown,
@@ -1657,69 +1733,6 @@ export class tool_router {
         "network capture only includes requests observed after attach and later navigation or reload.",
       ],
     };
-  }
-
-  private render_prompt_text(name: string, prompt_args: Record<string, unknown>): string {
-    if (name === "learn_browser_mcp") {
-      return [
-        "# Learn Browser MCP",
-        "",
-        "## Operating model",
-        "- This server multiplexes multiple MCP clients through one browser extension and enforces one lock owner per tab.",
-        "- Any `browser_*` tool requires an attached tab. Start with `browser_tabs { action: 'list' }` plus `browser_tabs { action: 'attach', index }`, or `browser_tabs { action: 'new', url }`.",
-        "- `browser_tabs { action: 'new' }` creates a tab and immediately attaches it for the current session.",
-        "- `browser_snapshot` is the preferred first read tool after attach; use screenshots when semantic output is insufficient.",
-        "",
-        "## Canonical workflows",
-        "1. Attach and observe: `browser_tabs { action: 'list' }` -> `browser_tabs { action: 'attach', index }` -> `browser_snapshot {}` -> `browser_lookup { text: '...' }`.",
-        "2. New tab: `browser_tabs { action: 'new', url: 'https://example.com' }` -> `browser_snapshot {}`.",
-        "3. Network debug: attach first -> `browser_navigate { action: 'reload' }` or `browser_navigate { url: '...' }` -> `browser_network_requests { action: 'list' }` -> `browser_network_requests { action: 'details', requestId: '...' }` -> optional replay.",
-        "",
-        "## Common mistakes",
-        "- `browser_navigate` with only `url` is valid and defaults to `action='url'`.",
-        "- `browser_network_requests` uses `requestId`; `request_id` is accepted as an alias.",
-        "- `detach_from_tab` can omit `tab_id` only when the session owns exactly one tab.",
-        "- Network capture starts after attach and later navigation or reload, not before.",
-      ].join("\n");
-    }
-
-    if (name === "attach_and_observe") {
-      return [
-        "Attach and observe workflow:",
-        "1. Call `browser_tabs { action: 'list' }` or `list_available_tabs {}`.",
-        "2. Choose a tab and call `browser_tabs { action: 'attach', index: ... }` or `attach_to_tab { tab_id: ... }`.",
-        "3. Call `browser_snapshot {}` first to read the page semantically.",
-        "4. If you need a specific target, call `browser_lookup { text: '...' }` and prefer `element_ref` when present.",
-        "5. Only after that should you use interaction or navigation tools.",
-      ].join("\n");
-    }
-
-    if (name === "network_debug_flow") {
-      const url_pattern =
-        typeof prompt_args.url_pattern === "string" && prompt_args.url_pattern.trim().length > 0
-          ? prompt_args.url_pattern.trim()
-          : "";
-      const safe_url_pattern = url_pattern.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
-      const list_step =
-        url_pattern.length > 0
-          ? `browser_network_requests { action: 'list', urlPattern: '${safe_url_pattern}' }`
-          : "browser_network_requests { action: 'list' }";
-
-      return [
-        "Network debug workflow:",
-        "1. Ensure the tab is attached first.",
-        "2. Trigger capture with `browser_navigate { action: 'reload' }` or by navigating to the target page.",
-        `3. Call \`${list_step}\` to inspect captured request metadata.`,
-        "4. Pick a `requestId` from the list rows and call `browser_network_requests { action: 'details', requestId: '...' }`.",
-        "5. If needed, call `browser_network_requests { action: 'replay', requestId: '...' }`.",
-        "6. Remember that list mode is metadata-only; decoded bodies are exposed by details mode.",
-      ].join("\n");
-    }
-
-    throw new tool_error("INVALID_ARGUMENT", `unknown prompt: ${name}`, false, {
-      name,
-      recovery_hint: "Call prompts/list to discover the available guidance prompts.",
-    });
   }
 
   private async persist_artifact_if_requested(

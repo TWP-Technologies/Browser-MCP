@@ -90,6 +90,60 @@ test("tool_router advertises onboarding and ergonomic browser guidance", async (
   }
 });
 
+test("tool_router keeps prompt metadata aligned between list and get", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  try {
+    const prompts = runtime.tool_router.list_prompts();
+    const network_prompt = prompts.find((prompt) => prompt.name === "network_debug_flow") as
+      | {
+          description?: string;
+          arguments?: Array<{ name?: string; description?: string }>;
+        }
+      | undefined;
+    const prompt_result = runtime.tool_router.get_prompt("network_debug_flow", {
+      url_pattern: "/api/items",
+    });
+
+    expect(network_prompt).toBeDefined();
+    expect(prompt_result.description).toBe(network_prompt?.description);
+    expect(network_prompt?.arguments?.[0]?.name).toBe("url_pattern");
+    expect(
+      String(
+        (prompt_result.messages as Array<{ content?: { text?: unknown } }> | undefined)?.[0]?.content?.text ?? "",
+      ),
+    ).toContain("/api/items");
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("tool_router rejects unknown prompt names with INVALID_ARGUMENT", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  let caught: unknown;
+
+  try {
+    runtime.tool_router.get_prompt("does_not_exist", {});
+  } catch (error) {
+    caught = error;
+  } finally {
+    await runtime.stop();
+  }
+
+  expect(caught).toBeDefined();
+  expect(caught).toBeInstanceOf(tool_error);
+  expect((caught as tool_error).code).toBe("INVALID_ARGUMENT");
+});
+
 test("attach_to_tab enforces lock conflict and detach handoff", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",

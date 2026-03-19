@@ -1063,7 +1063,7 @@ export class in_memory_bridge_transport implements bridge_transport {
           {
             id: "local-mcp",
             name: "Local MCP",
-            version: "0.3.0",
+            version: "0.4.0",
             description: "Synthetic local MCP extension",
             enabled: true,
             install_type: "development",

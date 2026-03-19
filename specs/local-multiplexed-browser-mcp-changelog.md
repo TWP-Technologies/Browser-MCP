@@ -16,6 +16,8 @@
   - `detach_from_tab` infers `tab_id` only when the current session owns exactly one tab
 - Added richer corrective error details and initialize-time instructions so MCP clients can recover from common browser-tool mistakes without external docs.
 - Extended integration and browser E2E coverage for prompt discovery, ergonomic aliases/defaults, and single-tab detach inference.
+- Centralized onboarding prompt metadata and rendering in the Bun router so `prompts/list`, `prompts/get`, and `learn_browser_mcp` all read from one prompt catalog.
+- Updated local release identifiers from `0.3.0` to `0.4.0`.
 
 ## 2026-03-17
 
