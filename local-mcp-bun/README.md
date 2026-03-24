@@ -115,9 +115,25 @@ Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SU
   - Use release `v0.4.0` or newer. Packaging now includes transitive module imports required by `background.js`.
 
 - Windows Chrome with WSL server:
-  - Keep default loopback settings and run the server first.
+  - Keep MCP bridge settings loopback-only and run the server first.
   - Validate server listener from Windows host before loading extension:
     - `Invoke-WebRequest http://127.0.0.1:37778/health`
+  - This applies to the MCP bridge itself, not to ad hoc page fixtures you host inside WSL for live browser testing.
+  - If Browser MCP reports `Frame with ID 0 is showing error page` on a local WSL fixture, verify that Windows Chrome can actually open that fixture before blaming the MCP.
+  - Do not assume a WSL process bound to `127.0.0.1` is reachable from Windows Chrome on every machine.
+
+### Manual Live Smoke for Windows Chrome + WSL
+
+- Keep the Browser MCP server on loopback. Do not widen `BRIDGE_HOST`.
+- For manual page-fixture validation from Windows Chrome against a Bun process running inside WSL, use the dedicated cross-host fixture helper:
+  - `cd local-mcp-bun && bun run scripts/manual_validation_fixture.ts`
+- The helper binds the page fixture to `0.0.0.0`, prints candidate URLs, and leaves the MCP bridge untouched.
+- Recommended flow:
+  - Start the MCP server normally.
+  - Start the manual fixture helper.
+  - Open one of the printed URLs in Windows Chrome.
+  - Attach Browser MCP to that tab and run live checks.
+- If the printed `http://127.0.0.1:PORT/` candidate fails from Windows Chrome, try one of the printed non-loopback candidate URLs instead.
 
 ## Test
 

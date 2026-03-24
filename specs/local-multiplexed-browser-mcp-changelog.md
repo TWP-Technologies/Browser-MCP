@@ -170,3 +170,9 @@
 - Fixed `browser_network_requests action=details` so the nested `request` payload stays metadata-only and no longer leaks cached body fields (`response_body`, `response_body_base64`, `response_body_cached_at`).
 - Tightened `browser_snapshot` and `browser_lookup` so `element_ref` is emitted only when the runtime already has a replayably stable unique selector; ambiguous nodes now omit `element_ref` instead of handing back an immediately-stale handle.
 - Added integration and roundtrip E2E coverage for both behaviors.
+
+## 2026-03-19 Manual validation helper update
+
+- Added a dedicated cross-host manual validation fixture helper for Windows Chrome + WSL live-smoke workflows.
+- Updated README guidance to distinguish the loopback-only MCP bridge from the intentionally cross-host page fixture.
+- Utility-only change: no MCP protocol, runtime lock, or bridge security-boundary behavior changed.
