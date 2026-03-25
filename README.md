@@ -1,4 +1,7 @@
 # Chrome Browser MCP
+[![local-mcp-bun-ci](https://github.com/TWP-Technologies/Browser-MCP/actions/workflows/ci.yml/badge.svg?branch=trunk)](https://github.com/TWP-Technologies/Browser-MCP/actions/workflows/ci.yml)
+![GitHub Release](https://img.shields.io/github/v/release/TWP-Technologies/browser-mcp?color=34d058)
+
 
 Local, multiplexed **Model Context Protocol (MCP)** server plus **Chrome extension** for browser automation.  
 Run multiple agent clients against one local browser bridge with tab-lock safety and loopback-only defaults.
