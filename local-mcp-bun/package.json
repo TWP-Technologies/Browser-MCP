@@ -1,6 +1,6 @@
 {
   "name": "@TWP-Technologies/Browser-MCP",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "description": "Local-only multiplexed Browser MCP server built with Bun",

@@ -45,13 +45,16 @@ Initial branch/hash: trunk @ 1a2f0db
 - `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun test tests/e2e/extension_roundtrip.test.ts` passed.
 - Submitted the extension predicate fix and waited a fourth 10-minute review window. CodeRabbit reported no actionable comments on the latest head. Greptile marked the head safe to merge and raised one worthwhile description gap: `pseudoStates` runtime accepts a single string, but the advertised schema description only mentioned arrays.
 - Applied the schema-description clarification and added integration coverage that keeps the description aligned with string runtime compatibility.
+- Bumped the release version from `0.4.1` to `0.4.2` in `local-mcp-bun/package.json` and `local-mcp-bun/chrome-extension/manifest.json` so the schema fix can be published as a patch release.
 
 ## Repository State
 
 - browser_mcp: trunk @ 1a2f0db
 - browser_mcp: review follow-up code on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 800af30
 - browser_mcp: string pseudoStates predicate fix on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ be9aa7f
+- browser_mcp: schema-description follow-up on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 000e8cd
 - Recent relevant commits from `git log --oneline -10`:
+  - `000e8cd docs(mcp): clarify pseudoStates string compatibility`
   - `be9aa7f fix(extension): honor string pseudoStates style filters`
   - `86f8677 fix(mcp): type style pseudo-state schemas`
   - `c636490 docs(agent-logs): record browser schema fix review cycle`
