@@ -32,8 +32,8 @@ Initial branch/hash: trunk @ 1a2f0db
 ## Repository State
 
 - browser_mcp: trunk @ 1a2f0db
-- browser_mcp: 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 9aa406a
+- browser_mcp: review follow-up code on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 800af30
 - Recent relevant commits from `git log --oneline -10`:
-  - `9aa406a fix(mcp): remove nested schema composition`
+  - `800af30 fix(mcp): remove nested schema composition`
   - `1984785 fix(mcp): advertise OpenAI-compatible tool schemas`
   - `1a2f0db chore(release): bump version to 0.4.1`
