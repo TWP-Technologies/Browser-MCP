@@ -364,16 +364,17 @@ export class tool_router {
             "Forwarded browser tool: browser_navigate. Navigates the attached tab. Canonical URL navigation is { action: 'url', url: 'https://example.com' }, but providing only url also defaults to action='url'. Use explicit actions for reload/back/forward/test_page.",
           inputSchema: {
             type: "object",
-            anyOf: [{ required: ["action"] }, { required: ["url"] }],
             properties: {
               action: {
                 type: "string",
                 enum: ["url", "back", "forward", "reload", "test_page"],
-                description: "Navigation mode. Use 'url' with url, or explicit history/reload/test_page actions.",
+                description:
+                  "Navigation mode. Use 'url' with url, or explicit history/reload/test_page actions. If omitted, url implies action='url'.",
               },
               url: {
                 type: "string",
-                description: "Target URL. If present without action, the server assumes action='url'.",
+                description:
+                  "Target URL. Required when action='url'. If present without action, the server assumes action='url'.",
               },
             },
           },
@@ -388,9 +389,11 @@ export class tool_router {
             "Forwarded browser tool: browser_interact. Executes a single action or ordered actions[] against selector or element_ref targets.",
           inputSchema: {
             type: "object",
-            anyOf: [{ required: ["action"] }, { required: ["actions"] }],
             properties: {
-              action: { type: "string" },
+              action: {
+                type: "string",
+                description: "Single interaction action. Required unless actions[] is provided.",
+              },
               selector: { type: "string" },
               element_ref: { type: "string" },
               text: { type: "string" },
@@ -414,6 +417,7 @@ export class tool_router {
               actions: {
                 type: "array",
                 minItems: 1,
+                description: "Ordered interaction actions. Required unless action is provided.",
                 items: {
                   type: "object",
                   properties: {
@@ -496,13 +500,15 @@ export class tool_router {
               element_ref: { type: "string" },
               property: { type: "string" },
               pseudoState: {
-                anyOf: [
-                  { type: "string" },
-                  {
-                    type: "array",
-                    items: { type: "string" },
-                  },
-                ],
+                type: "string",
+                description:
+                  "Single pseudo-state filter such as hover or focus. For multiple pseudo-states, prefer pseudoStates; runtime also accepts legacy pseudoState string arrays.",
+              },
+              pseudoStates: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Pseudo-state filters such as [\"hover\", \"focus\"]. Runtime also accepts a single string for convenience.",
               },
             },
           },
@@ -545,10 +551,15 @@ export class tool_router {
             "Forwarded browser tool: browser_evaluate. Executes a JavaScript expression or function in the attached tab and returns structured results.",
           inputSchema: {
             type: "object",
-            anyOf: [{ required: ["expression"] }, { required: ["function"] }],
             properties: {
-              expression: { type: "string" },
-              function: { type: "string" },
+              expression: {
+                type: "string",
+                description: "JavaScript expression to evaluate. Required unless function is provided.",
+              },
+              function: {
+                type: "string",
+                description: "JavaScript function source to execute. Required unless expression is provided.",
+              },
             },
           },
         });
