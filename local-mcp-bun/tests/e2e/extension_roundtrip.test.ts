@@ -643,6 +643,12 @@ test("extension bridge supports semantic observation, observability, and pdf exp
     });
     expect(Array.isArray(styles.matched_rules)).toBe(true);
 
+    const string_pseudo_styles = await runtime.tool_router.call_tool(agent_session_id, "browser_get_element_styles", {
+      selector: "#capture-target",
+      pseudoStates: "focus",
+    });
+    expect(string_pseudo_styles.pseudo_states).toEqual(["focus"]);
+
     await sleep(500);
     const network_list = (await runtime.tool_router.call_tool(agent_session_id, "browser_network_requests", {
       action: "list",

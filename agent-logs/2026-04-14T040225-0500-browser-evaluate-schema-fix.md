@@ -40,6 +40,9 @@ Initial branch/hash: trunk @ 1a2f0db
 - Submitted the follow-up branch update and waited a second 10-minute review window.
 - Hard-gate CI passed on Ubuntu, macOS, and Windows. CodeRabbit and Greptile both raised the same worthwhile follow-up: `browser_get_element_styles.pseudoState` was composition-free but description-only.
 - Applied the schema typing feedback by advertising `pseudoState` as a single string, adding `pseudoStates` as a string array, and normalizing both names in the in-memory transport and Chrome extension. Ignored CodeRabbit's docstring coverage warning as generic policy noise that does not match the repository's current TypeScript test style.
+- Submitted the typed pseudo-state update and waited a third 10-minute review window. Greptile marked the head safe to merge; CodeRabbit identified one worthwhile edge case where `normalize_pseudo_states` accepted string `pseudoStates` but the extension predicate did not force that state.
+- Applied the predicate fix and added e2e coverage for string `pseudoStates`.
+- `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun test tests/e2e/extension_roundtrip.test.ts` passed.
 
 ## Repository State
 

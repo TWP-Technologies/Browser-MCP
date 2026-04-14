@@ -3895,7 +3895,12 @@ function normalize_pseudo_states(args) {
 }
 
 function has_pseudo_state_argument(args) {
-  return typeof args?.pseudoState === "string" || Array.isArray(args?.pseudoState) || Array.isArray(args?.pseudoStates);
+  return (
+    typeof args?.pseudoState === "string" ||
+    typeof args?.pseudoStates === "string" ||
+    Array.isArray(args?.pseudoState) ||
+    Array.isArray(args?.pseudoStates)
+  );
 }
 
 async function execute_browser_get_element_styles(args, tab_id) {
