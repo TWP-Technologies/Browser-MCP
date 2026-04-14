@@ -46,6 +46,9 @@ Initial branch/hash: trunk @ 1a2f0db
 - Submitted the extension predicate fix and waited a fourth 10-minute review window. CodeRabbit reported no actionable comments on the latest head. Greptile marked the head safe to merge and raised one worthwhile description gap: `pseudoStates` runtime accepts a single string, but the advertised schema description only mentioned arrays.
 - Applied the schema-description clarification and added integration coverage that keeps the description aligned with string runtime compatibility.
 - Bumped the release version from `0.4.1` to `0.4.2` in `local-mcp-bun/package.json` and `local-mcp-bun/chrome-extension/manifest.json` so the schema fix can be published as a patch release.
+- CI caught two remaining runtime-facing hardcoded `0.4.1` values after the version bump: MCP `server_info.version` and in-memory synthetic extension metadata. Updated both to `0.4.2`.
+- `bun run test:hard-gate` passed after the full version alignment.
+- `bun run release:check-version -- --version 0.4.2` passed.
 
 ## Repository State
 
@@ -53,7 +56,9 @@ Initial branch/hash: trunk @ 1a2f0db
 - browser_mcp: review follow-up code on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 800af30
 - browser_mcp: string pseudoStates predicate fix on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ be9aa7f
 - browser_mcp: schema-description follow-up on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 000e8cd
+- browser_mcp: release package/manifest bump on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 2a2ba78
 - Recent relevant commits from `git log --oneline -10`:
+  - `2a2ba78 chore(release): bump version to 0.4.2`
   - `000e8cd docs(mcp): clarify pseudoStates string compatibility`
   - `be9aa7f fix(extension): honor string pseudoStates style filters`
   - `86f8677 fix(mcp): type style pseudo-state schemas`
