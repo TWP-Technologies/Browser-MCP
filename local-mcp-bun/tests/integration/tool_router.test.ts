@@ -9,6 +9,29 @@ function parse_test_bridge_port(): number {
 }
 
 const test_bridge_port = parse_test_bridge_port();
+const composition_schema_keys = ["oneOf", "anyOf", "allOf", "not"];
+
+function assert_no_composition_schema_keys(schema: unknown): void {
+  if (!schema || typeof schema !== "object") {
+    return;
+  }
+
+  const schema_record = schema as Record<string, unknown>;
+  for (const schema_key of composition_schema_keys) {
+    expect(schema_record).not.toHaveProperty(schema_key);
+  }
+
+  for (const value of Object.values(schema_record)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        assert_no_composition_schema_keys(item);
+      }
+      continue;
+    }
+
+    assert_no_composition_schema_keys(value);
+  }
+}
 
 test("tool_router lists tabs and lock metadata", async () => {
   const runtime = new local_mcp_runtime({
@@ -46,17 +69,19 @@ test("tool_router advertises browser_evaluate input requirements", async () => {
       }
     | undefined;
 
-  expect(evaluate_tool).toBeDefined();
-  expect(evaluate_tool?.inputSchema?.type).toBe("object");
-  expect(evaluate_tool?.inputSchema).not.toHaveProperty("anyOf");
-  expect(String(evaluate_tool?.inputSchema?.properties?.expression?.description ?? "")).toContain(
-    "Required unless function is provided",
-  );
-  expect(String(evaluate_tool?.inputSchema?.properties?.function?.description ?? "")).toContain(
-    "Required unless expression is provided",
-  );
-
-  await runtime.stop();
+  try {
+    expect(evaluate_tool).toBeDefined();
+    expect(evaluate_tool?.inputSchema?.type).toBe("object");
+    expect(evaluate_tool?.inputSchema).not.toHaveProperty("anyOf");
+    expect(String(evaluate_tool?.inputSchema?.properties?.expression?.description ?? "")).toContain(
+      "Required unless function is provided",
+    );
+    expect(String(evaluate_tool?.inputSchema?.properties?.function?.description ?? "")).toContain(
+      "Required unless expression is provided",
+    );
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("tool_router advertises OpenAI-compatible top-level object schemas", async () => {
@@ -67,11 +92,12 @@ test("tool_router advertises OpenAI-compatible top-level object schemas", async 
   });
 
   try {
-    const forbidden_top_level_schema_keys = ["oneOf", "anyOf", "allOf", "enum", "not"];
+    const forbidden_top_level_schema_keys = [...composition_schema_keys, "enum"];
 
     for (const tool of runtime.tool_router.list_tools()) {
       const input_schema = tool.inputSchema as Record<string, unknown> | undefined;
       expect(input_schema?.type).toBe("object");
+      assert_no_composition_schema_keys(input_schema);
 
       for (const schema_key of forbidden_top_level_schema_keys) {
         expect(input_schema).not.toHaveProperty(schema_key);

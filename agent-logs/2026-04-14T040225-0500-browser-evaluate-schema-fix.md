@@ -20,7 +20,20 @@ Initial branch/hash: trunk @ 1a2f0db
 - `bun run test:unit` passed.
 - `bun run lint:spec` passed.
 
+## Review Follow-up
+
+- Published PR 12 through Graphite and waited 10 minutes for automated review.
+- CodeRabbit and Copilot produced no actionable comments.
+- Greptile produced two worthwhile P2 comments:
+  - remove property-level composition from `browser_get_element_styles.pseudoState`;
+  - wrap the updated `browser_evaluate` schema test assertions in `try/finally` so `runtime.stop()` always runs.
+- Applied both comments and expanded regression coverage to reject composition keywords anywhere in advertised tool schemas while still allowing property-level `enum`.
+
 ## Repository State
 
 - browser_mcp: trunk @ 1a2f0db
-- Recent relevant commits from `git log --oneline -10`: no new commits during this session; latest remains `1a2f0db chore(release): bump version to 0.4.1`.
+- browser_mcp: 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 9aa406a
+- Recent relevant commits from `git log --oneline -10`:
+  - `9aa406a fix(mcp): remove nested schema composition`
+  - `1984785 fix(mcp): advertise OpenAI-compatible tool schemas`
+  - `1a2f0db chore(release): bump version to 0.4.1`

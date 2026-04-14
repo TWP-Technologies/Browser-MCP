@@ -196,7 +196,7 @@
 
 ### 8.4 Required Public Tool Interfaces (Clean-Break v2)
 
-- Every advertised MCP tool `inputSchema` MUST be a top-level JSON object schema and MUST NOT use top-level `oneOf`, `anyOf`, `allOf`, `enum`, or `not`. Alternative argument shapes MUST be documented in property descriptions and enforced by runtime validation.
+- Every advertised MCP tool `inputSchema` MUST be a top-level JSON object schema and MUST NOT use top-level `enum`. Composition keywords (`oneOf`, `anyOf`, `allOf`, `not`) MUST NOT appear anywhere in advertised `inputSchema` trees. Alternative argument shapes MUST be documented in property descriptions and enforced by runtime validation.
 - `list_available_tabs(input: {}) -> { tabs: tab_entry[] }`
   - `tab_entry`: `{ tab_id: number, url: string, title: string, is_locked_by_agent: boolean, locked_by_agent_session_id?: string }`
 - `attach_to_tab(input: { tab_id: number, wait_timeout_ms?: number }) -> { tab_id: number, attached: boolean, owner_agent_session_id: string }`

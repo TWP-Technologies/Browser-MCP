@@ -7,6 +7,7 @@
 - Reworked advertised Bun-router tool schemas so all MCP `inputSchema` objects avoid top-level `oneOf`, `anyOf`, `allOf`, `enum`, and `not` for OpenAI tool-registration compatibility.
 - Preserved alternate argument support for `browser_navigate`, `browser_interact`, and `browser_evaluate` through property-level guidance plus existing runtime validation.
 - Added integration coverage that scans every advertised tool schema for forbidden top-level schema keys.
+- Removed the remaining property-level composition keyword from `browser_get_element_styles.pseudoState` after review feedback, and tightened regression coverage to reject composition keywords anywhere in advertised tool schemas.
 
 ### Verification
 

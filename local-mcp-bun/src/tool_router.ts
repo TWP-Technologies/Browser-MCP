@@ -500,13 +500,7 @@ export class tool_router {
               element_ref: { type: "string" },
               property: { type: "string" },
               pseudoState: {
-                anyOf: [
-                  { type: "string" },
-                  {
-                    type: "array",
-                    items: { type: "string" },
-                  },
-                ],
+                description: "Pseudo-state filter. Accepts a single pseudo-state string or an array of pseudo-state strings.",
               },
             },
           },
