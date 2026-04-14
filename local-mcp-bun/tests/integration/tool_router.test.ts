@@ -123,6 +123,7 @@ test("tool_router advertises typed pseudo-state style inputs", async () => {
               string,
               {
                 type?: string;
+                description?: string;
                 items?: {
                   type?: string;
                 };
@@ -136,6 +137,7 @@ test("tool_router advertises typed pseudo-state style inputs", async () => {
     expect(properties?.pseudoState?.type).toBe("string");
     expect(properties?.pseudoStates?.type).toBe("array");
     expect(properties?.pseudoStates?.items?.type).toBe("string");
+    expect(properties?.pseudoStates?.description).toContain("single string");
   } finally {
     await runtime.stop();
   }

@@ -507,7 +507,8 @@ export class tool_router {
               pseudoStates: {
                 type: "array",
                 items: { type: "string" },
-                description: "Pseudo-state filters such as [\"hover\", \"focus\"].",
+                description:
+                  "Pseudo-state filters such as [\"hover\", \"focus\"]. Runtime also accepts a single string for convenience.",
               },
             },
           },

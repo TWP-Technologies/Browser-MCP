@@ -43,12 +43,18 @@ Initial branch/hash: trunk @ 1a2f0db
 - Submitted the typed pseudo-state update and waited a third 10-minute review window. Greptile marked the head safe to merge; CodeRabbit identified one worthwhile edge case where `normalize_pseudo_states` accepted string `pseudoStates` but the extension predicate did not force that state.
 - Applied the predicate fix and added e2e coverage for string `pseudoStates`.
 - `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun test tests/e2e/extension_roundtrip.test.ts` passed.
+- Submitted the extension predicate fix and waited a fourth 10-minute review window. CodeRabbit reported no actionable comments on the latest head. Greptile marked the head safe to merge and raised one worthwhile description gap: `pseudoStates` runtime accepts a single string, but the advertised schema description only mentioned arrays.
+- Applied the schema-description clarification and added integration coverage that keeps the description aligned with string runtime compatibility.
 
 ## Repository State
 
 - browser_mcp: trunk @ 1a2f0db
 - browser_mcp: review follow-up code on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ 800af30
+- browser_mcp: string pseudoStates predicate fix on 04-14-fix_mcp_advertise_openai-compatible_tool_schemas @ be9aa7f
 - Recent relevant commits from `git log --oneline -10`:
+  - `be9aa7f fix(extension): honor string pseudoStates style filters`
+  - `86f8677 fix(mcp): type style pseudo-state schemas`
+  - `c636490 docs(agent-logs): record browser schema fix review cycle`
   - `800af30 fix(mcp): remove nested schema composition`
   - `1984785 fix(mcp): advertise OpenAI-compatible tool schemas`
   - `1a2f0db chore(release): bump version to 0.4.1`
