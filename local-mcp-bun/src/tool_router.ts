@@ -500,7 +500,14 @@ export class tool_router {
               element_ref: { type: "string" },
               property: { type: "string" },
               pseudoState: {
-                description: "Pseudo-state filter. Accepts a single pseudo-state string or an array of pseudo-state strings.",
+                type: "string",
+                description:
+                  "Single pseudo-state filter such as hover or focus. For multiple pseudo-states, prefer pseudoStates; runtime also accepts legacy pseudoState string arrays.",
+              },
+              pseudoStates: {
+                type: "array",
+                items: { type: "string" },
+                description: "Pseudo-state filters such as [\"hover\", \"focus\"].",
               },
             },
           },

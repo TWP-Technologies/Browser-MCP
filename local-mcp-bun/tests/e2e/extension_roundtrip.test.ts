@@ -639,7 +639,7 @@ test("extension bridge supports semantic observation, observability, and pdf exp
 
     const styles = await runtime.tool_router.call_tool(agent_session_id, "browser_get_element_styles", {
       selector: "#capture-target",
-      pseudoState: ["hover"],
+      pseudoStates: ["hover"],
     });
     expect(Array.isArray(styles.matched_rules)).toBe(true);
 

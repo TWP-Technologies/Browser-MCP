@@ -77,6 +77,30 @@ interface in_memory_lookup_match {
   };
 }
 
+function append_pseudo_state_value(pseudo_states: string[], value: unknown): void {
+  if (typeof value === "string") {
+    pseudo_states.push(value);
+    return;
+  }
+
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      pseudo_states.push(entry);
+    }
+  }
+}
+
+function normalize_pseudo_states(args: Record<string, unknown>): string[] {
+  const pseudo_states: string[] = [];
+  append_pseudo_state_value(pseudo_states, args.pseudoState);
+  append_pseudo_state_value(pseudo_states, args.pseudoStates);
+  return pseudo_states;
+}
+
 export class in_memory_bridge_transport implements bridge_transport {
   private state: bridge_state;
   private readonly tabs_by_id: Map<number, tab_snapshot>;
@@ -848,11 +872,7 @@ export class in_memory_bridge_transport implements bridge_transport {
       this.require_tab(tab_id, "browser_get_element_styles");
       const selector = this.resolve_required_selector_from_args(tab_id, args, "browser_get_element_styles");
       const property = typeof args.property === "string" ? args.property : undefined;
-      const pseudo_states = Array.isArray(args.pseudoState)
-        ? args.pseudoState.filter((value): value is string => typeof value === "string")
-        : typeof args.pseudoState === "string"
-          ? [args.pseudoState]
-          : [];
+      const pseudo_states = normalize_pseudo_states(args);
       const computed_style = {
         display: "block",
         color: "rgb(0, 0, 0)",

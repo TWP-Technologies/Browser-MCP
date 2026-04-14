@@ -67,6 +67,13 @@ test("page-understanding parity tools return structured semantic results", async
     });
     expect(styles.matched_rules).toBeDefined();
     expect(styles.computed_style).toBeDefined();
+    expect(styles.pseudo_states).toEqual(["hover"]);
+
+    const plural_styles = await runtime.tool_router.call_tool(session_id, "browser_get_element_styles", {
+      element_ref: first_interactive?.element_ref,
+      pseudoStates: ["focus"],
+    });
+    expect(plural_styles.pseudo_states).toEqual(["focus"]);
 
     const evaluate = await runtime.tool_router.call_tool(session_id, "browser_evaluate", {
       function: "() => 'hello from function'",

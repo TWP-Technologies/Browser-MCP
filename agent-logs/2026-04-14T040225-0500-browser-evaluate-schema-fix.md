@@ -19,6 +19,15 @@ Initial branch/hash: trunk @ 1a2f0db
 - `bun run test:integration` passed.
 - `bun run test:unit` passed.
 - `bun run lint:spec` passed.
+- Second review follow-up verification:
+  - `bun test tests/integration/tool_router.test.ts` passed.
+  - `bun test tests/integration/parity_remaining.test.ts` passed.
+  - `bun run test:unit` passed.
+  - `bun run test:integration` passed.
+  - `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun run test:e2e` passed. Default port `37777` was occupied by an existing `chrome-browser-mcp-v0.4.1` process, so it was not terminated.
+  - `bun run test:fault` passed.
+  - `bun run test:concurrency` passed.
+  - `bun run lint:spec` passed.
 
 ## Review Follow-up
 
@@ -28,6 +37,9 @@ Initial branch/hash: trunk @ 1a2f0db
   - remove property-level composition from `browser_get_element_styles.pseudoState`;
   - wrap the updated `browser_evaluate` schema test assertions in `try/finally` so `runtime.stop()` always runs.
 - Applied both comments and expanded regression coverage to reject composition keywords anywhere in advertised tool schemas while still allowing property-level `enum`.
+- Submitted the follow-up branch update and waited a second 10-minute review window.
+- Hard-gate CI passed on Ubuntu, macOS, and Windows. CodeRabbit and Greptile both raised the same worthwhile follow-up: `browser_get_element_styles.pseudoState` was composition-free but description-only.
+- Applied the schema typing feedback by advertising `pseudoState` as a single string, adding `pseudoStates` as a string array, and normalizing both names in the in-memory transport and Chrome extension. Ignored CodeRabbit's docstring coverage warning as generic policy noise that does not match the repository's current TypeScript test style.
 
 ## Repository State
 

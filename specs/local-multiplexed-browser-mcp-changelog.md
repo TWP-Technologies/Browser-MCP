@@ -8,10 +8,18 @@
 - Preserved alternate argument support for `browser_navigate`, `browser_interact`, and `browser_evaluate` through property-level guidance plus existing runtime validation.
 - Added integration coverage that scans every advertised tool schema for forbidden top-level schema keys.
 - Removed the remaining property-level composition keyword from `browser_get_element_styles.pseudoState` after review feedback, and tightened regression coverage to reject composition keywords anywhere in advertised tool schemas.
+- Restored machine-readable style pseudo-state inputs with `pseudoState` as a string and `pseudoStates` as a string array, while preserving legacy runtime support for `pseudoState` arrays.
 
 ### Verification
 
 - `bun test tests/integration/tool_router.test.ts` passed.
+- `bun test tests/integration/parity_remaining.test.ts` passed.
+- `bun run test:unit` passed.
+- `bun run test:integration` passed.
+- `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun run test:e2e` passed.
+- `bun run test:fault` passed.
+- `bun run test:concurrency` passed.
+- `bun run lint:spec` passed.
 
 ## 2026-03-18
 

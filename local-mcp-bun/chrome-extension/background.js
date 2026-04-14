@@ -3870,18 +3870,43 @@ async function execute_browser_extract_content(args, tab_id) {
   };
 }
 
+function append_pseudo_state_value(pseudo_states, value) {
+  if (typeof value === "string") {
+    pseudo_states.push(value);
+    return;
+  }
+
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      pseudo_states.push(entry);
+    }
+  }
+}
+
+function normalize_pseudo_states(args) {
+  const pseudo_states = [];
+  append_pseudo_state_value(pseudo_states, args?.pseudoState);
+  append_pseudo_state_value(pseudo_states, args?.pseudoStates);
+  return pseudo_states;
+}
+
+function has_pseudo_state_argument(args) {
+  return typeof args?.pseudoState === "string" || Array.isArray(args?.pseudoState) || Array.isArray(args?.pseudoStates);
+}
+
 async function execute_browser_get_element_styles(args, tab_id) {
   const resolved_tab_id = assert_tab_id(tab_id);
   const resolved_target = await resolve_required_selector_target(args, resolved_tab_id, "browser_get_element_styles");
   const selector = resolved_target.selector;
   const property = typeof args?.property === "string" ? args.property : undefined;
-  const pseudo_states = Array.isArray(args?.pseudoState)
-    ? args.pseudoState.filter((value) => typeof value === "string")
-    : typeof args?.pseudoState === "string"
-      ? [args.pseudoState]
-      : [];
+  const pseudo_states = normalize_pseudo_states(args);
+  const should_force_pseudo_states = has_pseudo_state_argument(args);
 
-  if (Array.isArray(args?.pseudoState) || pseudo_states.length > 0) {
+  if (should_force_pseudo_states) {
     await force_pseudo_state(resolved_tab_id, selector, pseudo_states);
   }
 
@@ -3935,7 +3960,7 @@ async function execute_browser_get_element_styles(args, tab_id) {
           .filter(Boolean)
       : [];
   } finally {
-    if (Array.isArray(args?.pseudoState) || pseudo_states.length > 0) {
+    if (should_force_pseudo_states) {
       await force_pseudo_state(resolved_tab_id, selector, []);
     }
   }

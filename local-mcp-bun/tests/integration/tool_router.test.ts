@@ -108,6 +108,39 @@ test("tool_router advertises OpenAI-compatible top-level object schemas", async 
   }
 });
 
+test("tool_router advertises typed pseudo-state style inputs", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  try {
+    const styles_tool = runtime.tool_router.list_tools().find((tool) => tool.name === "browser_get_element_styles") as
+      | {
+          inputSchema?: {
+            properties?: Record<
+              string,
+              {
+                type?: string;
+                items?: {
+                  type?: string;
+                };
+              }
+            >;
+          };
+        }
+      | undefined;
+    const properties = styles_tool?.inputSchema?.properties;
+
+    expect(properties?.pseudoState?.type).toBe("string");
+    expect(properties?.pseudoStates?.type).toBe("array");
+    expect(properties?.pseudoStates?.items?.type).toBe("string");
+  } finally {
+    await runtime.stop();
+  }
+});
+
 test("tool_router advertises onboarding and ergonomic browser guidance", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
