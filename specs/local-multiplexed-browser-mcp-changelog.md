@@ -1,5 +1,17 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-04-14
+
+### Implemented
+
+- Reworked advertised Bun-router tool schemas so all MCP `inputSchema` objects avoid top-level `oneOf`, `anyOf`, `allOf`, `enum`, and `not` for OpenAI tool-registration compatibility.
+- Preserved alternate argument support for `browser_navigate`, `browser_interact`, and `browser_evaluate` through property-level guidance plus existing runtime validation.
+- Added integration coverage that scans every advertised tool schema for forbidden top-level schema keys.
+
+### Verification
+
+- `bun test tests/integration/tool_router.test.ts` passed.
+
 ## 2026-03-18
 
 ### Implemented

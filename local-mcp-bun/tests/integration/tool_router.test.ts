@@ -40,15 +40,46 @@ test("tool_router advertises browser_evaluate input requirements", async () => {
     .find((tool) => tool.name === "browser_evaluate") as
     | {
         inputSchema?: {
-          anyOf?: Array<{ required?: string[] }>;
+          type?: string;
+          properties?: Record<string, { description?: string }>;
         };
       }
     | undefined;
 
   expect(evaluate_tool).toBeDefined();
-  expect(evaluate_tool?.inputSchema?.anyOf).toEqual([{ required: ["expression"] }, { required: ["function"] }]);
+  expect(evaluate_tool?.inputSchema?.type).toBe("object");
+  expect(evaluate_tool?.inputSchema).not.toHaveProperty("anyOf");
+  expect(String(evaluate_tool?.inputSchema?.properties?.expression?.description ?? "")).toContain(
+    "Required unless function is provided",
+  );
+  expect(String(evaluate_tool?.inputSchema?.properties?.function?.description ?? "")).toContain(
+    "Required unless expression is provided",
+  );
 
   await runtime.stop();
+});
+
+test("tool_router advertises OpenAI-compatible top-level object schemas", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  try {
+    const forbidden_top_level_schema_keys = ["oneOf", "anyOf", "allOf", "enum", "not"];
+
+    for (const tool of runtime.tool_router.list_tools()) {
+      const input_schema = tool.inputSchema as Record<string, unknown> | undefined;
+      expect(input_schema?.type).toBe("object");
+
+      for (const schema_key of forbidden_top_level_schema_keys) {
+        expect(input_schema).not.toHaveProperty(schema_key);
+      }
+    }
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("tool_router advertises onboarding and ergonomic browser guidance", async () => {
@@ -65,7 +96,6 @@ test("tool_router advertises onboarding and ergonomic browser guidance", async (
       | {
           description?: string;
           inputSchema?: {
-            anyOf?: Array<{ required?: string[] }>;
             properties?: Record<string, { description?: string }>;
           };
         }
@@ -81,7 +111,7 @@ test("tool_router advertises onboarding and ergonomic browser guidance", async (
 
     expect(learn_tool).toBeDefined();
     expect(String(navigate_tool?.description ?? "")).toContain("Canonical URL navigation");
-    expect(navigate_tool?.inputSchema?.anyOf).toEqual([{ required: ["action"] }, { required: ["url"] }]);
+    expect(navigate_tool?.inputSchema).not.toHaveProperty("anyOf");
     expect(String(navigate_tool?.inputSchema?.properties?.url?.description ?? "")).toContain("assumes action='url'");
     expect(String(network_tool?.description ?? "")).toContain("Capture starts after attach");
     expect(String(network_tool?.inputSchema?.properties?.request_id?.description ?? "")).toContain("Alias for requestId");
