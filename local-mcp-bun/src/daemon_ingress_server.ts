@@ -331,11 +331,12 @@ export class daemon_ingress_server {
     }
 
     const cleanup_result = await this.runtime.tool_router.run_stale_session_cleanup();
-    if (cleanup_result.closed_session_ids.length > 0) {
-      this.close_connections_for_sessions(cleanup_result.closed_session_ids, "stale_session_timeout");
+    const stale_closed_session_ids = new Set(cleanup_result.closed_session_ids);
+    if (stale_closed_session_ids.size > 0) {
+      this.close_connections_for_sessions([...stale_closed_session_ids], "stale_session_timeout");
     }
 
-    this.close_connections_for_missing_sessions("session_closed");
+    this.close_connections_for_missing_sessions("session_closed", stale_closed_session_ids);
     this.close_stale_unbound_connections(cleanup_result.stale_session_timeout_minutes);
   }
 
@@ -371,8 +372,12 @@ export class daemon_ingress_server {
     }
   }
 
-  private close_connections_for_missing_sessions(reason: string): void {
+  private close_connections_for_missing_sessions(reason: string, ignored_session_ids: ReadonlySet<string> = new Set()): void {
     for (const [connection_id, agent_session_id] of this.agent_session_id_by_connection_id.entries()) {
+      if (ignored_session_ids.has(agent_session_id)) {
+        continue;
+      }
+
       if (this.runtime.session_registry.has_session(agent_session_id)) {
         continue;
       }
