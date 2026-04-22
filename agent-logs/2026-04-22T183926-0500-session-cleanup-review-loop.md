@@ -9,7 +9,7 @@
 - Browser-MCP: `session-cleanup-runtime` @ `b3a6aab`
 - Browser-MCP: `session-cleanup-extension` @ `6276dc8`
 - Browser-MCP: `session-cleanup-docs` @ `576d520`
-- Browser-MCP: `session-cleanup-log` @ `48973b1`
+- Browser-MCP: `session-cleanup-log` advanced from `48973b1` to `b569b76`
 - Graphite stack order at closeout: `session-cleanup-runtime` -> `session-cleanup-extension` -> `session-cleanup-docs` -> `session-cleanup-log`
 
 ## PR State
@@ -25,6 +25,7 @@
 - Published the first item in the stack by keeping PR #13 ready for review while the dependent diffs stayed draft.
 - Waited through multiple autobot review rounds on PR #13 and retriggered review when active development paused CodeRabbit.
 - Applied the worthwhile runtime follow-ups only on `session-cleanup-runtime`, then restacked and resubmitted after each fix batch.
+- Moved this session log onto the top `session-cleanup-log` diff so the runtime PR remained focused on runtime-only changes.
 
 ## Runtime Review-Loop Commits
 
