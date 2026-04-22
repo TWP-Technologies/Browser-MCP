@@ -331,6 +331,10 @@ export class daemon_ingress_server {
     }
 
     const cleanup_result = await this.runtime.tool_router.run_stale_session_cleanup();
+    if (this.stopping) {
+      return;
+    }
+
     const stale_closed_session_ids = new Set(cleanup_result.closed_session_ids);
     if (stale_closed_session_ids.size > 0) {
       this.close_connections_for_sessions([...stale_closed_session_ids], "stale_session_timeout");

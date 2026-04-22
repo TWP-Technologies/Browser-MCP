@@ -283,7 +283,15 @@ export class mcp_protocol_session {
 
   private set_initialized_agent_session_id(agent_session_id: string): void {
     this.initialized_agent_session_id = agent_session_id;
-    this.on_agent_session_bound?.(agent_session_id);
+    if (!this.on_agent_session_bound) {
+      return;
+    }
+
+    try {
+      this.on_agent_session_bound(agent_session_id);
+    } catch (error) {
+      console.error("failed to run on_agent_session_bound callback", error);
+    }
   }
 
   private clear_initialized_agent_session_id(): void {
@@ -293,7 +301,15 @@ export class mcp_protocol_session {
 
     const released_agent_session_id = this.initialized_agent_session_id;
     this.initialized_agent_session_id = null;
-    this.on_agent_session_released?.(released_agent_session_id);
+    if (!this.on_agent_session_released) {
+      return;
+    }
+
+    try {
+      this.on_agent_session_released(released_agent_session_id);
+    } catch (error) {
+      console.error("failed to run on_agent_session_released callback", error);
+    }
   }
 
   private touch_initialized_session_if_present(): void {

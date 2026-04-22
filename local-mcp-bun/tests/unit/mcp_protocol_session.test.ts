@@ -249,3 +249,52 @@ test("mcp_protocol_session returns SESSION_NOT_FOUND for explicit legacy session
     await runtime.stop();
   }
 });
+
+test("mcp_protocol_session ignores lifecycle callback failures", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const responses: json_rpc_response[] = [];
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+    on_agent_session_bound: () => {
+      throw new Error("bind failed");
+    },
+    on_agent_session_released: () => {
+      throw new Error("release failed");
+    },
+  });
+
+  const original_console_error = console.error;
+  const logged_errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    logged_errors.push(args);
+  };
+
+  try {
+    await protocol_session.handle_line(build_initialize_request("init", "callback-failure-test"));
+
+    const agent_session_id = runtime.session_registry.list_active_sessions()[0];
+    if (typeof agent_session_id !== "string") {
+      throw new Error("expected initialized session");
+    }
+
+    await protocol_session.close();
+
+    const initialize_response = responses.find((response) => response.id === "init");
+    const initialize_result = initialize_response?.result as { agent_session_id?: string } | undefined;
+
+    expect(initialize_result?.agent_session_id).toBe(agent_session_id);
+    expect(runtime.session_registry.list_active_sessions()).toEqual([]);
+    expect(logged_errors).toHaveLength(2);
+  } finally {
+    console.error = original_console_error;
+    await runtime.stop();
+  }
+});

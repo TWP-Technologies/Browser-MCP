@@ -78,32 +78,35 @@ test("closing a waiting session cancels the pending attach before ownership tran
     bridge_port: 37777,
   });
 
-  const owner_session_id = runtime.tool_router.open_session("owner").agent_session_id;
-  const waiting_session_id = runtime.tool_router.open_session("waiting").agent_session_id;
-
-  await runtime.tool_router.call_tool(owner_session_id, "attach_to_tab", { tab_id: 101 });
-  const waiting_attach = runtime.tool_router.call_tool(waiting_session_id, "attach_to_tab", {
-    tab_id: 101,
-    wait_timeout_ms: 1000,
-  });
-
-  await new Promise((resolve_promise) => {
-    setTimeout(resolve_promise, 20);
-  });
-
-  await runtime.tool_router.close_session(waiting_session_id);
-  await runtime.tool_router.call_tool(owner_session_id, "detach_from_tab", { tab_id: 101 });
-
   try {
-    await waiting_attach;
-    throw new Error("expected waiting attach to be cancelled");
-  } catch (error) {
-    expect(error).toBeInstanceOf(tool_error);
-    expect((error as tool_error).code).toBe("SESSION_NOT_FOUND");
-  }
+    const owner_session_id = runtime.tool_router.open_session("owner").agent_session_id;
+    const waiting_session_id = runtime.tool_router.open_session("waiting").agent_session_id;
 
-  expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
-  await runtime.stop();
+    await runtime.tool_router.call_tool(owner_session_id, "attach_to_tab", { tab_id: 101 });
+    const waiting_attach = runtime.tool_router.call_tool(waiting_session_id, "attach_to_tab", {
+      tab_id: 101,
+      wait_timeout_ms: 1000,
+    });
+
+    await new Promise((resolve_promise) => {
+      setTimeout(resolve_promise, 20);
+    });
+
+    await runtime.tool_router.close_session(waiting_session_id);
+    await runtime.tool_router.call_tool(owner_session_id, "detach_from_tab", { tab_id: 101 });
+
+    try {
+      await waiting_attach;
+      throw new Error("expected waiting attach to be cancelled");
+    } catch (error) {
+      expect(error).toBeInstanceOf(tool_error);
+      expect((error as tool_error).code).toBe("SESSION_NOT_FOUND");
+    }
+
+    expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("close_session reports waiters cancelled while detach cleanup is in flight", async () => {
