@@ -177,13 +177,9 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "tools/call") {
-        const legacy_agent_session_id = request.params?.agent_session_id;
         const tool_name = request.params?.name;
         const args = request.params?.arguments;
-        const agent_session_id =
-          typeof legacy_agent_session_id === "string" && legacy_agent_session_id.length > 0
-            ? legacy_agent_session_id
-            : this.resolve_initialized_agent_session_id();
+        const agent_session_id = this.resolve_requested_agent_session_id(request.params?.agent_session_id);
 
         if (!agent_session_id || typeof tool_name !== "string") {
           throw new tool_error("INVALID_ARGUMENT", "tools/call requires agent_session_id and name", false);
@@ -208,11 +204,7 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "session/close") {
-        const agent_session_id = request.params?.agent_session_id;
-        const resolved_agent_session_id =
-          typeof agent_session_id === "string" && agent_session_id.length > 0
-            ? agent_session_id
-            : this.resolve_initialized_agent_session_id();
+        const resolved_agent_session_id = this.resolve_requested_agent_session_id(request.params?.agent_session_id);
         if (!resolved_agent_session_id) {
           throw new tool_error("INVALID_ARGUMENT", "session/close requires agent_session_id", false);
         }
@@ -336,6 +328,24 @@ export class mcp_protocol_session {
     }
 
     return this.initialized_agent_session_id;
+  }
+
+  private resolve_requested_agent_session_id(explicit_agent_session_id: unknown): string | null {
+    if (typeof explicit_agent_session_id !== "string" || explicit_agent_session_id.length === 0) {
+      return this.resolve_initialized_agent_session_id();
+    }
+
+    if (this.runtime.session_registry.has_session(explicit_agent_session_id)) {
+      return explicit_agent_session_id;
+    }
+
+    if (this.initialized_agent_session_id === explicit_agent_session_id) {
+      this.clear_initialized_agent_session_id();
+    }
+
+    throw new tool_error("SESSION_NOT_FOUND", `unknown session: ${explicit_agent_session_id}`, false, {
+      agent_session_id: explicit_agent_session_id,
+    });
   }
 
   private resolve_requested_protocol_version(request: json_rpc_request): string {

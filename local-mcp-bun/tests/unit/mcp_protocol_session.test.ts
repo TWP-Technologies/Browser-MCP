@@ -250,6 +250,67 @@ test("mcp_protocol_session returns SESSION_NOT_FOUND for explicit legacy session
   }
 });
 
+test("mcp_protocol_session clears stale bound state when an explicit agent_session_id is reused", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const released_session_ids: string[] = [];
+  const responses: json_rpc_response[] = [];
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+    on_agent_session_released: (agent_session_id) => {
+      released_session_ids.push(agent_session_id);
+    },
+  });
+
+  try {
+    await protocol_session.handle_line(build_initialize_request("init", "explicit-stale-bound-id"));
+
+    const agent_session_id = runtime.session_registry.list_active_sessions()[0];
+    if (typeof agent_session_id !== "string") {
+      throw new Error("expected initialized session");
+    }
+
+    await runtime.tool_router.close_session(agent_session_id);
+    await protocol_session.handle_line(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "explicit-call",
+        method: "tools/call",
+        params: {
+          agent_session_id,
+          name: "list_available_tabs",
+          arguments: {},
+        },
+      }),
+    );
+
+    const call_response = responses.find((response) => response.id === "explicit-call");
+    const call_result = call_response?.result as
+      | {
+          isError?: boolean;
+          structuredContent?: {
+            code?: string;
+            message?: string;
+          };
+        }
+      | undefined;
+
+    expect(call_result?.isError).toBe(true);
+    expect(call_result?.structuredContent?.code).toBe("SESSION_NOT_FOUND");
+    expect(call_result?.structuredContent?.message).toContain(agent_session_id);
+    expect(released_session_ids).toEqual([agent_session_id]);
+  } finally {
+    await runtime.stop();
+  }
+});
+
 test("mcp_protocol_session ignores lifecycle callback failures", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
