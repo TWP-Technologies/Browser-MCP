@@ -105,3 +105,79 @@ test("closing a waiting session cancels the pending attach before ownership tran
   expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
   await runtime.stop();
 });
+
+test("close_session reports waiters cancelled while detach cleanup is in flight", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const owner_session_id = runtime.tool_router.open_session("owner").agent_session_id;
+  const closing_session_id = runtime.tool_router.open_session("closing").agent_session_id;
+
+  await runtime.tool_router.call_tool(owner_session_id, "attach_to_tab", { tab_id: 102 });
+  await runtime.tool_router.call_tool(closing_session_id, "attach_to_tab", { tab_id: 101 });
+
+  const original_detach_from_tab = bridge.detach_from_tab.bind(bridge);
+  const original_reconcile_locks_with_bridge = runtime.tool_router.reconcile_locks_with_bridge.bind(runtime.tool_router);
+  let release_detach: (() => void) | undefined;
+  let release_reconcile: (() => void) | undefined;
+  const detach_started = new Promise<void>((resolve_started) => {
+    bridge.detach_from_tab = async (tab_id, agent_session_id) => {
+      if (tab_id === 101 && agent_session_id === closing_session_id) {
+        resolve_started();
+        await new Promise<void>((resolve_detach) => {
+          release_detach = resolve_detach;
+        });
+      }
+
+      return await original_detach_from_tab(tab_id, agent_session_id);
+    };
+  });
+  runtime.tool_router.reconcile_locks_with_bridge = async (reason) => {
+    if (reason === "call_tool") {
+      await new Promise<void>((resolve_reconcile) => {
+        release_reconcile = resolve_reconcile;
+      });
+    }
+
+    await original_reconcile_locks_with_bridge(reason);
+  };
+
+  try {
+    const waiting_attach = runtime.tool_router.call_tool(closing_session_id, "attach_to_tab", {
+      tab_id: 102,
+      wait_timeout_ms: 1000,
+    });
+
+    await new Promise((resolve_promise) => {
+      setTimeout(resolve_promise, 20);
+    });
+
+    const close_session_promise = runtime.tool_router.close_session(closing_session_id);
+    await detach_started;
+    release_reconcile?.();
+    await new Promise((resolve_promise) => {
+      setTimeout(resolve_promise, 20);
+    });
+    release_detach?.();
+
+    const close_result = await close_session_promise;
+
+    try {
+      await waiting_attach;
+      throw new Error("expected waiting attach to be cancelled");
+    } catch (error) {
+      expect(error).toBeInstanceOf(tool_error);
+      expect((error as tool_error).code).toBe("SESSION_NOT_FOUND");
+    }
+
+    expect(close_result.cancelled_waiting_tab_ids).toEqual([102]);
+  } finally {
+    bridge.detach_from_tab = original_detach_from_tab;
+    runtime.tool_router.reconcile_locks_with_bridge = original_reconcile_locks_with_bridge;
+    await runtime.stop();
+  }
+});

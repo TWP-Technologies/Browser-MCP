@@ -189,7 +189,6 @@ export class mcp_protocol_session {
           throw new tool_error("INVALID_ARGUMENT", "tools/call requires agent_session_id and name", false);
         }
 
-        this.touch_session(agent_session_id);
         const parsed_args = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
         const result = await this.runtime.tool_router.call_tool(agent_session_id, tool_name, parsed_args);
 

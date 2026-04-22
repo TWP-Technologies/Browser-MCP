@@ -1726,11 +1726,14 @@ export class tool_router {
       }
     }
 
-    this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
+    const newly_cancelled_waiting_tab_ids = this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
     await this.publish_connections_snapshot(reason);
     return {
       released_tab_ids,
-      cancelled_waiting_tab_ids,
+      cancelled_waiting_tab_ids: dedupe_sorted_tab_ids([
+        ...cancelled_waiting_tab_ids,
+        ...newly_cancelled_waiting_tab_ids,
+      ]),
     };
   }
 

@@ -201,3 +201,51 @@ test("mcp_protocol_session clears stale implicit session ids for tools/call and 
     await runtime.stop();
   }
 });
+
+test("mcp_protocol_session returns SESSION_NOT_FOUND for explicit legacy session ids", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const responses: json_rpc_response[] = [];
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+  });
+
+  try {
+    await protocol_session.handle_line(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "legacy-call",
+        method: "tools/call",
+        params: {
+          agent_session_id: "missing-session",
+          name: "list_available_tabs",
+          arguments: {},
+        },
+      }),
+    );
+
+    const call_response = responses.find((response) => response.id === "legacy-call");
+    const call_result = call_response?.result as
+      | {
+          isError?: boolean;
+          structuredContent?: {
+            code?: string;
+            message?: string;
+          };
+        }
+      | undefined;
+
+    expect(call_result?.isError).toBe(true);
+    expect(call_result?.structuredContent?.code).toBe("SESSION_NOT_FOUND");
+    expect(call_result?.structuredContent?.message).toContain("missing-session");
+  } finally {
+    await runtime.stop();
+  }
+});
