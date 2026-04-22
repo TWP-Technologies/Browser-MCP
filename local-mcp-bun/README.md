@@ -75,10 +75,18 @@ You only need to set bridge env vars when overriding defaults (for example custo
 - `MCP_DAEMON_PORT` defaults to `BRIDGE_PORT+1`.
 - `MCP_DAEMON_IDLE_TIMEOUT_MS` defaults to `900000` (15 minutes).
 - `MCP_DAEMON_CONNECT_TIMEOUT_MS` defaults to `10000`.
+- `MCP_SESSION_IDLE_TIMEOUT_MINUTES` defaults to `120`; set `0` to disable automatic stale-session cleanup.
 - `MCP_DAEMON_STATE_PATH` overrides daemon metadata path (default temp path keyed by daemon port).
 - `MCP_AUTH_TOKEN=<value>` enables token auth with explicit value.
 - `MCP_AUTH_TOKEN=auto` or `MCP_AUTH_AUTO=1` enables token auth with auto token generated/reused by the daemon runtime and persisted in daemon state metadata.
 - If auth env vars are not set, auth remains disabled (local loopback boundary still enforced).
+
+### Stale Session Cleanup
+
+- The runtime treats staleness as lack of valid MCP traffic for the configured number of minutes.
+- Automatic cleanup hard-reaps stale sessions by cancelling queued waiters, releasing owned locks, and detaching owned tabs when possible.
+- In shared-daemon mode, stale session cleanup also closes the owning ingress socket so abandoned proxy processes can exit; idle unbound ingress sockets may also be closed on the same timeout.
+- The extension popup exposes a compact `Auto-cleanup` control with `Off` or `<minutes>m`, plus `Run Cleanup Now`.
 
 ### MCP Auth Token: Is It Required?
 
@@ -107,6 +115,7 @@ Artifacts are written to `local-mcp-bun/dist/release/v<version>/` with `SHA256SU
 
 - Extension logs repeated `ERR_CONNECTION_REFUSED` for `ws://127.0.0.1:37777/extension`:
   - Start the MCP server and verify daemon health: `curl http://127.0.0.1:37778/health`
+  - Health now includes `active_proxy_connections`, `active_sessions`, and `stale_session_timeout_minutes`.
   - If using the packaged binary, force daemon mode once to confirm bind ownership:
     - `MCP_DAEMON_MODE=daemon ./chrome-browser-mcp-v<version>-linux-x64`
   - Confirm popup MCP port matches server `BRIDGE_PORT`.

@@ -14,6 +14,7 @@
 - Shared singleton daemon ingress for multi-process MCP clients so one runtime owns the bridge bind and multiple stdio clients proxy concurrently.
 - Single shared browser-extension bridge over WebSocket using Bun `Bun.serve()`.
 - Tab lock orchestration that enforces one debugger owner per `tab_id` at any time.
+- Configurable stale-session cleanup with service-authoritative hard reap, queued-waiter cancellation, and stale proxy connection shutdown after idle timeout.
 - Required tools: `list_available_tabs`, `attach_to_tab`, `detach_from_tab`.
 - Clean-break v2 API contract for local Bun implementation (no backward-compat guarantee with blueprint tool shapes).
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
@@ -44,6 +45,8 @@
 - User A calls `detach_from_tab(tab_id=101)` -> app MUST detach debugger and release lock atomically -> tab becomes attachable for other clients.
 - User extension process restarts -> app MUST mark extension bridge unavailable, fail active debug commands with deterministic retryable errors, and MUST clear/repair stale lock ownership based on detach/disconnect reconciliation logic -> service recovers without manual state surgery.
 - User MCP client crashes while holding lock -> app MUST detect channel close, auto-detach when possible, and MUST release lock after timeout guard if detach callback is unavailable -> deadlock is prevented.
+- User leaves an MCP client idle past the configured session timeout -> app MUST hard-reap the stale session, cancel queued lock waiters, detach owned tabs when possible, and close stale daemon ingress sockets so abandoned proxy executables exit -> deadlock and process leakage are prevented.
+- User changes cleanup timeout in the extension popup -> extension MUST persist the timeout in minutes locally and MUST sync the cleanup policy to the runtime immediately when connected or on the next bridge reconnect -> UI and service policy converge without adding a separate settings surface.
 - User provides malformed tool arguments -> app MUST return input-validation error with field-level diagnostics -> caller can correct request without inspecting logs.
 
 ### 2.3 Feature-to-Test Mapping
@@ -57,12 +60,14 @@
 - `browser_take_screenshot` tool -> Integration (raw image payload + metadata), Contract/API (MCP image content blocks), E2E (viewport/full-page/selector capture and selector failure path).
 - Structured error model -> Unit (error code mapping), Contract/API (error payload schema), E2E (observability of error classes under failure injection).
 - Crash/restart recovery -> Integration (simulated client crash), E2E (extension restart mid-session), Regression (stale lock cleanup).
+- Stale-session cleanup -> Unit (stale selection + waiter cancellation), Integration (hard reap + daemon socket close), Regression (waiting session cannot attach after close).
 - Local security boundary -> Unit (token config parsing), Integration (loopback binding + auth checks), Security (unauthorized local request rejection), E2E (token optional path).
 - Living spec governance -> Unit (spec completeness checker script), Integration (CI gate for spec consistency), E2E (milestone completion updates reflected in spec state fields).
 
 ## 3.0 Data Models (Required)
 
 - `agent_session`: `agent_session_id` (REQUIRED, string, unique, human-readable prefix + nonce), `client_name` (OPTIONAL, string, max 64 chars), `connected_at` (REQUIRED, RFC3339 timestamp), `last_seen_at` (REQUIRED, RFC3339 timestamp), `state` (REQUIRED, enum: `connected|disconnecting|disconnected`), `auth_mode` (REQUIRED, enum: `none|token`), `owned_tab_ids` (REQUIRED, array<number>, default `[]`).
+- `cleanup_policy`: `stale_session_timeout_minutes` (REQUIRED, integer, `0` disables automatic cleanup, default `120`), `policy_source` (REQUIRED, enum: `env|extension_ui`), `updated_at` (REQUIRED, RFC3339 timestamp).
 - `extension_bridge`: `bridge_id` (REQUIRED, string), `connection_state` (REQUIRED, enum: `up|down|reconnecting`), `connected_at` (OPTIONAL, RFC3339 timestamp), `last_disconnect_reason` (OPTIONAL, enum: `socket_closed|heartbeat_timeout|manual|unknown`), `protocol_version` (REQUIRED, semver string).
 - `tab_snapshot`: `tab_id` (REQUIRED, integer > 0), `url` (REQUIRED, URL string), `title` (REQUIRED, string), `debugger_attached` (REQUIRED, boolean), `is_locked_by_agent` (REQUIRED, boolean), `locked_by_agent_session_id` (OPTIONAL, string when locked), `lock_acquired_at` (OPTIONAL, RFC3339 timestamp).
 - `tab_lock`: `tab_id` (REQUIRED, integer > 0, unique), `owner_agent_session_id` (REQUIRED, string), `lock_state` (REQUIRED, enum: `pending_attach|attached|releasing`), `lease_expires_at` (OPTIONAL, RFC3339 timestamp), `wait_queue` (REQUIRED, array<lock_wait_request>, default `[]`).
@@ -155,6 +160,8 @@
 | FR-013 | Repository Layout Standard | The implementation MUST use a co-located layout where custom extension resides under the local Bun implementation tree. | High | Unit (path resolver tests), Integration (build/test scripts detect expected layout), E2E (end-to-end dev bootstrap on clean clone). |
 | FR-014 | Cross-Platform Test Matrix | The system MUST run required test suites on Linux, macOS, and Windows in CI for release eligibility, and MUST publish per-OS hard-gate evidence artifacts for auditability. | Critical | Integration (CI workflow checks + artifact upload), E2E (matrix run with required pass gates), Performance (runtime bounds per suite). |
 | FR-015 | Hard Quality Gate | The release process MUST block merge when unit, integration, e2e, fault-injection, and concurrency suites fail. | Critical | Integration (branch protection + workflow checks), E2E (intentional failing test blocks merge), Regression (gate remains enforced). |
+| FR-016 | Stale Session Auto-Cleanup | The system MUST support configurable session idle cleanup in minutes, MUST treat `0` as disabled, and MUST hard-reap stale sessions by cancelling queued waiters, releasing locks, and detaching owned tabs when possible. | High | Unit (timeout parsing + stale selection), Integration (manual cleanup action + hard reap), Regression (waiting attach cannot resurrect after close). |
+| FR-017 | Stale Proxy Connection Shutdown | In shared-daemon mode, the system MUST close ingress sockets for stale sessions and MAY close unbound idle ingress sockets using the same timeout so abandoned proxy executables exit without waiting for manual client shutdown. | High | Integration (daemon ingress stale-socket close), Regression (proxy health drops after cleanup). |
 | FR-018 | Legal and Branding Compliance Automation | The system MUST enforce Apache-2.0 modification notice and forbidden branding/endpoint checks via an automated compliance scanner mapped to requirement IDs. | High | Unit (scanner rule fixtures pass/fail), Integration (`lint:compliance` gate), Regression (forbidden token insertion fails CI). |
 
 ## 7.0 Measurable Non-Functional Requirements (NFRs) (Critical for Architecture)
@@ -213,10 +220,11 @@
 ### 8.5 Internal Components
 
 - `session_registry`: manages ASID lifecycle, heartbeat/last_seen, disconnect hooks.
+- `session_registry`: manages ASID lifecycle, heartbeat/last_seen, disconnect hooks, and stale-session selection.
 - `bridge_manager`: owns WebSocket lifecycle (`open`, `message`, `close`, `error`, `drain`) and extension heartbeat.
 - `tab_lock_manager`: atomic lock/unlock APIs, wait queue, lease expiry, recovery reconciliation.
 - `debugger_adapter`: thin wrapper over `chrome.debugger.attach/detach/sendCommand/getTargets`.
-- `tool_router`: validates tool input, applies auth, dispatches to domain services, returns structured output/errors.
+- `tool_router`: validates tool input, applies auth, dispatches to domain services, owns cleanup policy, and performs hard session reaping.
 - `observability_adapter`: structured logs, metrics, correlation IDs.
 
 ### 8.6 State Machines
@@ -229,6 +237,8 @@
 
 - On `chrome.debugger.onDetach`, lock MUST be released for matching `tab_id` unless reattachment is already pending in same owner session.
 - On client disconnect, owned locks MUST enter `releasing` and complete detach within configured timeout.
+- On stale-session cleanup, queued waiters for that session MUST be cancelled before any released lock can transfer ownership.
+- In daemon/proxy mode, stale-session cleanup MUST close the owning ingress socket so abandoned proxy executables can exit; direct mode MAY reap the logical session without exiting the process.
 - On extension bridge loss, active operations MUST fail fast with retryable errors and lock reconciliation MUST run at reconnect.
 - Lock reconciliation SHOULD consult debugger target metadata (`getTargets` with `attached` indicator) before final cleanup.
 
