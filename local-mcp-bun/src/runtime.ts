@@ -9,6 +9,7 @@ export interface runtime_options {
   bridge_host: string;
   bridge_port: number;
   auth_token?: string;
+  session_idle_timeout_minutes?: number;
 }
 
 export class local_mcp_runtime {
@@ -28,6 +29,7 @@ export class local_mcp_runtime {
     });
     this.tool_router = new tool_router(this.session_registry, this.tab_lock_manager, this.bridge_transport, {
       auth_token: options.auth_token,
+      stale_session_timeout_minutes: options.session_idle_timeout_minutes,
     });
     this.stopped = false;
 
@@ -58,13 +60,7 @@ export class local_mcp_runtime {
     const active_sessions = this.session_registry.list_active_sessions();
     for (const agent_session_id of active_sessions) {
       try {
-        await this.tool_router.release_locks_for_session(agent_session_id);
-      } catch {
-        // best-effort shutdown release
-      }
-
-      try {
-        this.session_registry.close_session(agent_session_id);
+        await this.tool_router.close_session(agent_session_id);
       } catch {
         // session may already be closed by another path
       }

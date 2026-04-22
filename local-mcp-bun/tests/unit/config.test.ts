@@ -8,6 +8,7 @@ import {
   resolve_daemon_idle_timeout_ms,
   resolve_daemon_mode,
   resolve_daemon_port,
+  resolve_session_idle_timeout_minutes,
 } from "../../src/config";
 
 test("is_loopback_host accepts loopback hostnames and addresses", () => {
@@ -103,4 +104,11 @@ test("resolve_daemon timeout helpers apply defaults and parse env", () => {
   expect(resolve_daemon_idle_timeout_ms({ MCP_DAEMON_IDLE_TIMEOUT_MS: "1200000" })).toBe(1200000);
   expect(resolve_daemon_connect_timeout_ms({})).toBe(10000);
   expect(resolve_daemon_connect_timeout_ms({ MCP_DAEMON_CONNECT_TIMEOUT_MS: "25000" })).toBe(25000);
+});
+
+test("resolve_session_idle_timeout_minutes defaults to 120 and accepts zero disable", () => {
+  expect(resolve_session_idle_timeout_minutes({})).toBe(120);
+  expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "0" })).toBe(0);
+  expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "240" })).toBe(240);
+  expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "-1" })).toBe(120);
 });

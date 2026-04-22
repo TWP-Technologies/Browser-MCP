@@ -2,6 +2,15 @@ import { generate_agent_session_id, now_iso_string } from "./id";
 import { tool_error } from "./errors";
 import type { agent_session, session_snapshot } from "./types";
 
+function parse_session_timestamp_ms(iso_timestamp: string): number {
+  const parsed = Date.parse(iso_timestamp);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+
+  return 0;
+}
+
 export class session_registry {
   private readonly sessions_by_id: Map<string, agent_session>;
 
@@ -41,6 +50,10 @@ export class session_registry {
     return session;
   }
 
+  public has_session(agent_session_id: string): boolean {
+    return this.sessions_by_id.has(agent_session_id);
+  }
+
   public touch_session(agent_session_id: string): void {
     const session = this.get_session(agent_session_id);
     session.last_seen_at = now_iso_string();
@@ -73,6 +86,27 @@ export class session_registry {
 
   public list_active_sessions(): string[] {
     return [...this.sessions_by_id.keys()];
+  }
+
+  public list_stale_session_ids(timeout_minutes: number, now_ms = Date.now()): string[] {
+    if (!Number.isFinite(timeout_minutes) || timeout_minutes <= 0) {
+      return [];
+    }
+
+    const stale_before_ms = now_ms - timeout_minutes * 60_000;
+    const stale_session_ids: string[] = [];
+
+    for (const session of this.sessions_by_id.values()) {
+      const last_seen_at_ms = parse_session_timestamp_ms(session.last_seen_at);
+      if (last_seen_at_ms > stale_before_ms) {
+        continue;
+      }
+
+      stale_session_ids.push(session.agent_session_id);
+    }
+
+    stale_session_ids.sort((left, right) => left.localeCompare(right));
+    return stale_session_ids;
   }
 
   public list_session_snapshots(): session_snapshot[] {

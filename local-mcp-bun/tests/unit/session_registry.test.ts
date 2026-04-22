@@ -50,3 +50,15 @@ test("session_registry emits stable snapshots with owned tabs", () => {
   expect(alpha_snapshot?.owned_tab_ids).toEqual([101, 202]);
   expect(beta_snapshot?.owned_tab_ids).toEqual([303]);
 });
+
+test("session_registry lists stale sessions from last_seen_at", () => {
+  const registry = new session_registry();
+  const stale_session = registry.create_session("stale");
+  const fresh_session = registry.create_session("fresh");
+
+  registry.get_session(stale_session.agent_session_id).last_seen_at = new Date("2026-04-22T10:00:00.000Z").toISOString();
+  registry.get_session(fresh_session.agent_session_id).last_seen_at = new Date("2026-04-22T15:30:00.000Z").toISOString();
+
+  const stale_session_ids = registry.list_stale_session_ids(120, new Date("2026-04-22T16:00:00.000Z").getTime());
+  expect(stale_session_ids).toEqual([stale_session.agent_session_id]);
+});

@@ -3,6 +3,10 @@ interface stdio_proxy_server_options {
   connect_timeout_ms: number;
 }
 
+function is_graceful_daemon_close_reason(reason: string): boolean {
+  return reason === "stale_session_timeout" || reason === "stale_connection_timeout";
+}
+
 export class stdio_proxy_server {
   private readonly daemon_url: string;
   private readonly connect_timeout_ms: number;
@@ -26,8 +30,8 @@ export class stdio_proxy_server {
     this.socket.addEventListener("message", (event) => {
       this.handle_daemon_message(event.data);
     });
-    this.socket.addEventListener("close", () => {
-      this.handle_daemon_close("socket closed");
+    this.socket.addEventListener("close", (event) => {
+      this.handle_daemon_close(event.reason || "socket closed");
     });
     this.socket.addEventListener("error", () => {
       this.handle_daemon_close("socket error");
@@ -135,7 +139,7 @@ export class stdio_proxy_server {
       return;
     }
 
-    if (this.closing_intent || this.stdin_ended) {
+    if (this.closing_intent || this.stdin_ended || is_graceful_daemon_close_reason(reason)) {
       this.exit_process(0);
       return;
     }

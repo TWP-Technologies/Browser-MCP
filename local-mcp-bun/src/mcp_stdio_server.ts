@@ -2,10 +2,13 @@ import { mcp_protocol_session } from "./mcp_protocol_session";
 import { local_mcp_runtime } from "./runtime";
 import type { json_rpc_response } from "./types";
 
+const direct_cleanup_interval_ms = 60_000;
+
 export class mcp_stdio_server {
   private readonly runtime: local_mcp_runtime;
   private readonly protocol_session: mcp_protocol_session;
   private line_buffer: string;
+  private cleanup_timer: ReturnType<typeof setInterval> | undefined;
 
   public constructor(runtime: local_mcp_runtime) {
     this.runtime = runtime;
@@ -18,8 +21,12 @@ export class mcp_stdio_server {
 
   public start(): void {
     process.stdin.setEncoding("utf8");
+    this.cleanup_timer = setInterval(() => {
+      void this.runtime.tool_router.run_stale_session_cleanup();
+    }, direct_cleanup_interval_ms);
     process.stdin.on("data", (chunk) => this.handle_chunk(chunk));
     process.stdin.on("end", () => {
+      this.clear_cleanup_timer();
       this.protocol_session
         .close()
         .catch(() => {
@@ -65,5 +72,14 @@ export class mcp_stdio_server {
 
   private write_response(response: json_rpc_response): void {
     process.stdout.write(`${JSON.stringify(response)}\n`);
+  }
+
+  private clear_cleanup_timer(): void {
+    if (!this.cleanup_timer) {
+      return;
+    }
+
+    clearInterval(this.cleanup_timer);
+    this.cleanup_timer = undefined;
   }
 }

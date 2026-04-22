@@ -6,6 +6,10 @@ interface ingress_ws_data {
   connected_at: string;
 }
 
+interface closeable_socket {
+  close: (code?: number, reason?: string) => void;
+}
+
 export interface daemon_health_snapshot {
   service: "local-mcp-daemon";
   pid: number;
@@ -17,10 +21,12 @@ export interface daemon_health_snapshot {
   bridge_port: number;
   bridge_state: string;
   active_proxy_connections: number;
+  active_sessions: number;
   auth_enabled: boolean;
   auth_token_hint?: string;
   daemon_state_path: string;
   server_version: string;
+  stale_session_timeout_minutes: number;
 }
 
 interface daemon_ingress_server_options {
@@ -34,7 +40,10 @@ interface daemon_ingress_server_options {
   auth_enabled: boolean;
   auth_token_hint?: string;
   on_idle_timeout: () => Promise<void>;
+  cleanup_interval_ms?: number;
 }
+
+const default_cleanup_interval_ms = 60_000;
 
 export class daemon_ingress_server {
   private readonly runtime: local_mcp_runtime;
@@ -44,14 +53,20 @@ export class daemon_ingress_server {
   private readonly bridge_host: string;
   private readonly bridge_port: number;
   private readonly idle_timeout_ms: number;
+  private readonly cleanup_interval_ms: number;
   private readonly auth_enabled: boolean;
   private readonly auth_token_hint?: string;
   private readonly on_idle_timeout: () => Promise<void>;
   private readonly sessions_by_connection_id: Map<number, mcp_protocol_session>;
+  private readonly sockets_by_connection_id: Map<number, closeable_socket>;
+  private readonly agent_session_id_by_connection_id: Map<number, string>;
+  private readonly connection_id_by_agent_session_id: Map<string, number>;
+  private readonly last_activity_at_ms_by_connection_id: Map<number, number>;
   private readonly started_at: string;
   private next_connection_id: number;
   private server: Bun.Server<ingress_ws_data>;
   private idle_timer: ReturnType<typeof setTimeout> | undefined;
+  private cleanup_timer: ReturnType<typeof setInterval> | undefined;
   private stopping: boolean;
 
   public constructor(options: daemon_ingress_server_options) {
@@ -62,10 +77,15 @@ export class daemon_ingress_server {
     this.bridge_port = options.bridge_port;
     this.daemon_state_path = options.daemon_state_path;
     this.idle_timeout_ms = options.idle_timeout_ms;
+    this.cleanup_interval_ms = options.cleanup_interval_ms ?? default_cleanup_interval_ms;
     this.auth_enabled = options.auth_enabled;
     this.auth_token_hint = options.auth_token_hint;
     this.on_idle_timeout = options.on_idle_timeout;
     this.sessions_by_connection_id = new Map<number, mcp_protocol_session>();
+    this.sockets_by_connection_id = new Map<number, closeable_socket>();
+    this.agent_session_id_by_connection_id = new Map<number, string>();
+    this.connection_id_by_agent_session_id = new Map<string, number>();
+    this.last_activity_at_ms_by_connection_id = new Map<number, number>();
     this.started_at = new Date().toISOString();
     this.next_connection_id = 1;
     this.stopping = false;
@@ -85,6 +105,10 @@ export class daemon_ingress_server {
         },
       },
     });
+
+    this.cleanup_timer = setInterval(() => {
+      void this.run_cleanup_tick();
+    }, this.cleanup_interval_ms);
   }
 
   public get_health_snapshot(): daemon_health_snapshot {
@@ -99,10 +123,12 @@ export class daemon_ingress_server {
       bridge_port: this.bridge_port,
       bridge_state: this.runtime.bridge_transport.get_state(),
       active_proxy_connections: this.sessions_by_connection_id.size,
+      active_sessions: this.runtime.session_registry.list_active_sessions().length,
       auth_enabled: this.auth_enabled,
       auth_token_hint: this.auth_token_hint,
       daemon_state_path: this.daemon_state_path,
       server_version: server_info.version,
+      stale_session_timeout_minutes: this.runtime.tool_router.get_stale_session_timeout_minutes(),
     };
   }
 
@@ -113,6 +139,7 @@ export class daemon_ingress_server {
 
     this.stopping = true;
     this.clear_idle_timer();
+    this.clear_cleanup_timer();
     this.server.stop(true);
 
     for (const session of this.sessions_by_connection_id.values()) {
@@ -122,6 +149,10 @@ export class daemon_ingress_server {
     }
 
     this.sessions_by_connection_id.clear();
+    this.sockets_by_connection_id.clear();
+    this.agent_session_id_by_connection_id.clear();
+    this.connection_id_by_agent_session_id.clear();
+    this.last_activity_at_ms_by_connection_id.clear();
   }
 
   private handle_fetch(request: Request, server_instance: Bun.Server<ingress_ws_data>): Response {
@@ -156,6 +187,12 @@ export class daemon_ingress_server {
     const connection_id = socket.data.connection_id;
     const session = new mcp_protocol_session({
       runtime: this.runtime,
+      on_agent_session_bound: (agent_session_id) => {
+        this.bind_agent_session_to_connection(connection_id, agent_session_id);
+      },
+      on_agent_session_released: (agent_session_id) => {
+        this.unbind_agent_session_from_connection(connection_id, agent_session_id);
+      },
       write_response: (response) => {
         if (!this.sessions_by_connection_id.has(connection_id)) {
           return;
@@ -166,6 +203,8 @@ export class daemon_ingress_server {
     });
 
     this.sessions_by_connection_id.set(connection_id, session);
+    this.sockets_by_connection_id.set(connection_id, socket);
+    this.last_activity_at_ms_by_connection_id.set(connection_id, Date.now());
   }
 
   private handle_socket_message(
@@ -174,6 +213,7 @@ export class daemon_ingress_server {
   ): void {
     const connection_id = socket.data.connection_id;
     const session = this.sessions_by_connection_id.get(connection_id);
+    this.last_activity_at_ms_by_connection_id.set(connection_id, Date.now());
     if (!session) {
       return;
     }
@@ -197,7 +237,10 @@ export class daemon_ingress_server {
       return;
     }
 
+    this.unbind_agent_session_from_connection(connection_id);
     this.sessions_by_connection_id.delete(connection_id);
+    this.sockets_by_connection_id.delete(connection_id);
+    this.last_activity_at_ms_by_connection_id.delete(connection_id);
     await session.close().catch(() => {
       // best-effort cleanup for closed sockets
     });
@@ -221,5 +264,84 @@ export class daemon_ingress_server {
 
     clearTimeout(this.idle_timer);
     this.idle_timer = undefined;
+  }
+
+  private bind_agent_session_to_connection(connection_id: number, agent_session_id: string): void {
+    this.unbind_agent_session_from_connection(connection_id);
+    this.agent_session_id_by_connection_id.set(connection_id, agent_session_id);
+    this.connection_id_by_agent_session_id.set(agent_session_id, connection_id);
+  }
+
+  private unbind_agent_session_from_connection(connection_id: number, agent_session_id?: string): void {
+    const bound_agent_session_id = this.agent_session_id_by_connection_id.get(connection_id);
+    const resolved_agent_session_id = agent_session_id ?? bound_agent_session_id;
+    if (typeof resolved_agent_session_id === "string") {
+      const mapped_connection_id = this.connection_id_by_agent_session_id.get(resolved_agent_session_id);
+      if (mapped_connection_id === connection_id) {
+        this.connection_id_by_agent_session_id.delete(resolved_agent_session_id);
+      }
+    }
+
+    if (!bound_agent_session_id) {
+      return;
+    }
+
+    if (!agent_session_id || bound_agent_session_id === agent_session_id) {
+      this.agent_session_id_by_connection_id.delete(connection_id);
+    }
+  }
+
+  private async run_cleanup_tick(): Promise<void> {
+    if (this.stopping) {
+      return;
+    }
+
+    const cleanup_result = await this.runtime.tool_router.run_stale_session_cleanup();
+    if (cleanup_result.closed_session_ids.length > 0) {
+      this.close_connections_for_sessions(cleanup_result.closed_session_ids, "stale_session_timeout");
+    }
+
+    this.close_stale_unbound_connections(cleanup_result.stale_session_timeout_minutes);
+  }
+
+  private close_connections_for_sessions(agent_session_ids: string[], reason: string): void {
+    for (const agent_session_id of agent_session_ids) {
+      const connection_id = this.connection_id_by_agent_session_id.get(agent_session_id);
+      if (typeof connection_id !== "number") {
+        continue;
+      }
+
+      const socket = this.sockets_by_connection_id.get(connection_id);
+      socket?.close(1000, reason);
+    }
+  }
+
+  private close_stale_unbound_connections(stale_session_timeout_minutes: number): void {
+    if (stale_session_timeout_minutes <= 0) {
+      return;
+    }
+
+    const stale_before_ms = Date.now() - stale_session_timeout_minutes * 60_000;
+    for (const [connection_id, last_activity_at_ms] of this.last_activity_at_ms_by_connection_id.entries()) {
+      if (this.agent_session_id_by_connection_id.has(connection_id)) {
+        continue;
+      }
+
+      if (last_activity_at_ms > stale_before_ms) {
+        continue;
+      }
+
+      const socket = this.sockets_by_connection_id.get(connection_id);
+      socket?.close(1000, "stale_connection_timeout");
+    }
+  }
+
+  private clear_cleanup_timer(): void {
+    if (!this.cleanup_timer) {
+      return;
+    }
+
+    clearInterval(this.cleanup_timer);
+    this.cleanup_timer = undefined;
   }
 }

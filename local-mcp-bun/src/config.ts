@@ -87,6 +87,20 @@ function parse_positive_integer(input: string | undefined, fallback: number): nu
   return parsed;
 }
 
+function parse_non_negative_integer(input: string | undefined, fallback: number): number {
+  const configured = get_non_empty_string(input);
+  if (!configured) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(configured, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
 export function resolve_daemon_mode(
   env: Record<string, string | undefined>,
   resolved_bridge_mode: bridge_mode,
@@ -124,4 +138,8 @@ export function resolve_daemon_idle_timeout_ms(env: Record<string, string | unde
 
 export function resolve_daemon_connect_timeout_ms(env: Record<string, string | undefined>): number {
   return parse_positive_integer(env.MCP_DAEMON_CONNECT_TIMEOUT_MS, 10_000);
+}
+
+export function resolve_session_idle_timeout_minutes(env: Record<string, string | undefined>): number {
+  return parse_non_negative_integer(env.MCP_SESSION_IDLE_TIMEOUT_MINUTES, 120);
 }

@@ -582,6 +582,44 @@ test("ui admin detach_tab_lock releases the owner lock", async () => {
   await runtime.stop();
 });
 
+test("ui admin can update cleanup policy and close stale sessions", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const stale_session_id = runtime.tool_router.open_session("admin-stale").agent_session_id;
+  const fresh_session_id = runtime.tool_router.open_session("admin-fresh").agent_session_id;
+
+  runtime.session_registry.get_session(stale_session_id).last_seen_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  runtime.session_registry.get_session(fresh_session_id).last_seen_at = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+
+  const policy_response = await bridge.emit_ui_admin_request_for_tests("set_cleanup_policy", {
+    stale_session_timeout_minutes: 120,
+  });
+  expect(policy_response.ok).toBe(true);
+  expect((policy_response.result as { stale_session_timeout_minutes: number }).stale_session_timeout_minutes).toBe(120);
+
+  const cleanup_response = await bridge.emit_ui_admin_request_for_tests("run_stale_session_cleanup", {});
+  expect(cleanup_response.ok).toBe(true);
+  const cleanup_result = cleanup_response.result as {
+    stale_session_timeout_minutes: number;
+    stale_session_ids: string[];
+    closed_session_ids: string[];
+    failed: Array<{ agent_session_id: string; error: string }>;
+  };
+  expect(cleanup_result.stale_session_timeout_minutes).toBe(120);
+  expect(cleanup_result.stale_session_ids).toContain(stale_session_id);
+  expect(cleanup_result.closed_session_ids).toContain(stale_session_id);
+  expect(cleanup_result.closed_session_ids).not.toContain(fresh_session_id);
+  expect(cleanup_result.failed).toEqual([]);
+  expect(runtime.session_registry.list_active_sessions()).toEqual([fresh_session_id]);
+
+  await runtime.stop();
+});
+
 test("runtime enforces loopback-only bridge host", () => {
   expect(
     () =>

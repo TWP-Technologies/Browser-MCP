@@ -15,6 +15,13 @@ interface lock_record {
   waiters: lock_waiter[];
 }
 
+function create_waiter_cancelled_error(agent_session_id: string, tab_id: number): tool_error {
+  return new tool_error("SESSION_NOT_FOUND", `session closed while waiting for lock on tab ${tab_id}`, false, {
+    agent_session_id,
+    tab_id,
+  });
+}
+
 export class tab_lock_manager {
   private readonly locks_by_tab_id: Map<number, lock_record>;
 
@@ -137,6 +144,49 @@ export class tab_lock_manager {
     }
 
     return released_tab_ids;
+  }
+
+  public list_owned_tab_ids(agent_session_id: string): number[] {
+    const owned_tab_ids: number[] = [];
+
+    for (const [tab_id, record] of this.locks_by_tab_id.entries()) {
+      if (record.lock.owner_agent_session_id !== agent_session_id) {
+        continue;
+      }
+
+      owned_tab_ids.push(tab_id);
+    }
+
+    owned_tab_ids.sort((left, right) => left - right);
+    return owned_tab_ids;
+  }
+
+  public cancel_waiters_by_owner(agent_session_id: string): number[] {
+    const waiting_tab_ids: number[] = [];
+
+    for (const [tab_id, record] of this.locks_by_tab_id.entries()) {
+      const retained_waiters: lock_waiter[] = [];
+      let removed_waiter = false;
+
+      for (const waiter of record.waiters) {
+        if (waiter.agent_session_id !== agent_session_id) {
+          retained_waiters.push(waiter);
+          continue;
+        }
+
+        removed_waiter = true;
+        clearTimeout(waiter.timeout_id);
+        waiter.reject(create_waiter_cancelled_error(agent_session_id, tab_id));
+      }
+
+      record.waiters = retained_waiters;
+      if (removed_waiter) {
+        waiting_tab_ids.push(tab_id);
+      }
+    }
+
+    waiting_tab_ids.sort((left, right) => left - right);
+    return waiting_tab_ids;
   }
 
   private remove_waiter(tab_id: number, agent_session_id: string): void {

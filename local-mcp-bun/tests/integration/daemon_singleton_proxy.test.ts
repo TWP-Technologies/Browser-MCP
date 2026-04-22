@@ -21,6 +21,8 @@ interface daemon_health_payload {
   daemon_port: number;
   bridge_port: number;
   active_proxy_connections: number;
+  active_sessions?: number;
+  stale_session_timeout_minutes?: number;
 }
 
 interface running_client {
@@ -250,6 +252,8 @@ test("auto mode multiplexes two stdio clients through a single shared daemon", a
   expect(daemon_health?.service).toBe("local-mcp-daemon");
   expect(daemon_health?.bridge_port).toBe(bridge_port);
   expect((daemon_health?.active_proxy_connections ?? 0) >= 2).toBe(true);
+  expect((daemon_health?.active_sessions ?? 0) >= 2).toBe(true);
+  expect(daemon_health?.stale_session_timeout_minutes).toBe(120);
   expect(client_a.process.exitCode).toBeNull();
   expect(client_b.process.exitCode).toBeNull();
 
