@@ -6,6 +6,8 @@ import { socket_attempt_lifecycle } from "./socket_attempt_lifecycle.js";
 const extension_id = chrome.runtime.id;
 const default_bridge_url = "ws://127.0.0.1:37777/extension";
 const default_mcp_port = 37777;
+const default_stale_session_timeout_minutes = 120;
+const max_stale_session_timeout_minutes = 10080;
 const min_port = 1;
 const max_port = 65535;
 
@@ -30,6 +32,8 @@ const stealth_mode_by_tab = new Map();
 let bridge_socket = null;
 let bridge_url = default_bridge_url;
 let mcp_port = default_mcp_port;
+let stale_session_timeout_minutes = default_stale_session_timeout_minutes;
+let cleanup_policy_sync_pending = true;
 let extension_enabled = true;
 let heartbeat_timer = null;
 let bridge_connection_state = "idle";
@@ -335,6 +339,21 @@ function parse_port_from_bridge_url(candidate_url) {
   return parse_valid_port(Number.parseInt(match[1], 10));
 }
 
+function parse_cleanup_timeout_minutes(input) {
+  const parsed_value =
+    typeof input === "number"
+      ? input
+      : typeof input === "string" && input.trim().length > 0
+        ? Number.parseInt(input, 10)
+        : Number.NaN;
+
+  if (!Number.isInteger(parsed_value) || parsed_value < 0 || parsed_value > max_stale_session_timeout_minutes) {
+    return null;
+  }
+
+  return parsed_value;
+}
+
 async function init() {
   await hydrate_bridge_config();
   register_runtime_listeners();
@@ -362,6 +381,12 @@ async function init() {
     if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN) {
       schedule_bridge_reconnect("alarm");
       return;
+    }
+
+    if (cleanup_policy_sync_pending) {
+      sync_cleanup_policy_to_service().catch((error) => {
+        log_warn("cleanup policy sync failed", error);
+      });
     }
 
     send_tabs_update().catch((error) => {
@@ -488,7 +513,12 @@ function register_debugger_event_listener() {
 }
 
 async function hydrate_bridge_config() {
-  const result = await chrome.storage.local.get(["bridge_url", "mcp_port", "extension_enabled"]);
+  const result = await chrome.storage.local.get([
+    "bridge_url",
+    "mcp_port",
+    "extension_enabled",
+    "stale_session_timeout_minutes",
+  ]);
 
   if (typeof result.extension_enabled === "boolean") {
     extension_enabled = result.extension_enabled;
@@ -504,6 +534,10 @@ async function hydrate_bridge_config() {
   const port_from_url = parse_port_from_bridge_url(result.bridge_url);
   mcp_port = port_from_storage ?? port_from_url ?? default_mcp_port;
   bridge_url = build_bridge_url(mcp_port);
+
+  const stored_timeout_minutes = parse_cleanup_timeout_minutes(result.stale_session_timeout_minutes);
+  stale_session_timeout_minutes = stored_timeout_minutes ?? default_stale_session_timeout_minutes;
+  cleanup_policy_sync_pending = true;
 }
 
 function is_socket_active(socket, socket_generation) {
@@ -743,6 +777,10 @@ function connect_bridge(reason = "manual") {
       log_warn("tabs update on open failed", error);
     });
 
+    sync_cleanup_policy_to_service().catch((error) => {
+      log_warn("cleanup policy sync on open failed", error);
+    });
+
     start_heartbeat();
     notify_ui_state_change();
   });
@@ -887,6 +925,24 @@ async function send_ui_admin_request(action, payload) {
   });
 }
 
+async function sync_cleanup_policy_to_service() {
+  if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
+    return false;
+  }
+
+  const result = await send_ui_admin_request("set_cleanup_policy", {
+    stale_session_timeout_minutes,
+  });
+  const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
+  if (synced_timeout_minutes !== null) {
+    stale_session_timeout_minutes = synced_timeout_minutes;
+  }
+
+  cleanup_policy_sync_pending = false;
+  notify_ui_state_change();
+  return true;
+}
+
 async function sync_tabs_snapshot(send_update = true) {
   const tabs = await get_tabs_snapshot();
   latest_tabs_snapshot = tabs;
@@ -913,6 +969,7 @@ async function get_ui_state() {
     connection_hint: resolve_waiting_connection_hint(),
     bridge_url,
     mcp_port,
+    stale_session_timeout_minutes,
     tabs: latest_tabs_snapshot,
     connections_snapshot: latest_connections_snapshot,
   };
@@ -955,6 +1012,27 @@ async function set_mcp_port(next_port) {
   if (extension_enabled) {
     disconnect_bridge("port_changed");
     connect_bridge("port_changed");
+  } else {
+    notify_ui_state_change();
+  }
+
+  return await get_ui_state();
+}
+
+async function set_stale_session_timeout_policy(next_timeout_minutes) {
+  const validated_timeout_minutes = parse_cleanup_timeout_minutes(next_timeout_minutes);
+  if (validated_timeout_minutes === null) {
+    throw new Error(`stale_session_timeout_minutes must be an integer between 0 and ${max_stale_session_timeout_minutes}`);
+  }
+
+  stale_session_timeout_minutes = validated_timeout_minutes;
+  cleanup_policy_sync_pending = true;
+  await chrome.storage.local.set({
+    stale_session_timeout_minutes,
+  });
+
+  if (bridge_connection_state === "open") {
+    await sync_cleanup_policy_to_service();
   } else {
     notify_ui_state_change();
   }
@@ -1122,6 +1200,16 @@ function register_ui_message_listener() {
         return await set_mcp_port(parsed_port);
       }
 
+      if (message.type === "ui_set_cleanup_policy") {
+        const parsed_timeout_minutes =
+          typeof message.stale_session_timeout_minutes === "number"
+            ? message.stale_session_timeout_minutes
+            : typeof message.stale_session_timeout_minutes === "string"
+              ? Number.parseInt(message.stale_session_timeout_minutes, 10)
+              : Number.NaN;
+        return await set_stale_session_timeout_policy(parsed_timeout_minutes);
+      }
+
       if (message.type === "ui_navigate_to_tab") {
         return await navigate_to_tab(message.tab_id);
       }
@@ -1165,6 +1253,11 @@ function register_ui_message_listener() {
 
       if (message.type === "ui_close_all_sessions") {
         const result = await send_ui_admin_request("close_all_sessions", {});
+        return result;
+      }
+
+      if (message.type === "ui_run_stale_cleanup") {
+        const result = await send_ui_admin_request("run_stale_session_cleanup", {});
         return result;
       }
 

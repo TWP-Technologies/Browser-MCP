@@ -6,6 +6,10 @@ export interface toggle_intent_state {
   queued_target_enabled: boolean | null;
 }
 
+export interface cleanup_session_state {
+  last_seen_at: string;
+}
+
 function pad_2(value: number): string {
   return String(value).padStart(2, "0");
 }
@@ -60,4 +64,37 @@ export function format_snapshot_badge_timestamp(iso_timestamp: string | undefine
   const month = parsed.getMonth() + 1;
   const day = parsed.getDate();
   return `${month}/${day} ${hour_12}:${minute} ${meridiem}`;
+}
+
+export function format_cleanup_chip_label(stale_session_timeout_minutes: number): string {
+  if (!Number.isFinite(stale_session_timeout_minutes) || stale_session_timeout_minutes <= 0) {
+    return "Auto-cleanup Off";
+  }
+
+  return `Auto-cleanup ${stale_session_timeout_minutes}m`;
+}
+
+export function is_session_overdue(
+  session: cleanup_session_state,
+  stale_session_timeout_minutes: number,
+  now_ms = Date.now(),
+): boolean {
+  if (!Number.isFinite(stale_session_timeout_minutes) || stale_session_timeout_minutes <= 0) {
+    return false;
+  }
+
+  const parsed_last_seen_at = Date.parse(session.last_seen_at);
+  if (!Number.isFinite(parsed_last_seen_at)) {
+    return false;
+  }
+
+  return parsed_last_seen_at <= now_ms - stale_session_timeout_minutes * 60_000;
+}
+
+export function count_overdue_sessions(
+  sessions: cleanup_session_state[],
+  stale_session_timeout_minutes: number,
+  now_ms = Date.now(),
+): number {
+  return sessions.filter((session) => is_session_overdue(session, stale_session_timeout_minutes, now_ms)).length;
 }

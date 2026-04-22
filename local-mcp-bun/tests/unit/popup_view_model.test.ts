@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  count_overdue_sessions,
   compute_next_toggle_target_enabled,
+  format_cleanup_chip_label,
   format_snapshot_badge_timestamp,
+  is_session_overdue,
   resolve_toggle_reference_enabled,
 } from "../../chrome-extension/popup_view_model";
 
@@ -76,5 +79,49 @@ describe("popup_view_model snapshot timestamp formatting", () => {
   test("returns hyphen for missing or invalid timestamps", () => {
     expect(format_snapshot_badge_timestamp(undefined)).toBe("-");
     expect(format_snapshot_badge_timestamp("not-a-date")).toBe("-");
+  });
+});
+
+describe("popup_view_model cleanup helpers", () => {
+  test("formats cleanup chip labels for enabled and disabled states", () => {
+    expect(format_cleanup_chip_label(120)).toBe("Auto-cleanup 120m");
+    expect(format_cleanup_chip_label(0)).toBe("Auto-cleanup Off");
+  });
+
+  test("detects overdue sessions from last_seen_at", () => {
+    const now = new Date(2026, 3, 22, 16, 0, 0).getTime();
+    expect(
+      is_session_overdue(
+        {
+          last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString(),
+        },
+        120,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      is_session_overdue(
+        {
+          last_seen_at: new Date(2026, 3, 22, 14, 30, 1).toISOString(),
+        },
+        120,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("counts overdue sessions across the snapshot list", () => {
+    const now = new Date(2026, 3, 22, 16, 0, 0).getTime();
+    expect(
+      count_overdue_sessions(
+        [
+          { last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString() },
+          { last_seen_at: new Date(2026, 3, 22, 15, 0, 0).toISOString() },
+          { last_seen_at: "invalid" },
+        ],
+        120,
+        now,
+      ),
+    ).toBe(1);
   });
 });
