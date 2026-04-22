@@ -106,11 +106,75 @@ test("daemon ingress closes stale bound sockets during cleanup sweeps", async ()
     expect(typeof agent_session_id).toBe("string");
 
     runtime.session_registry.get_session(agent_session_id as string).last_seen_at = new Date(
-      "2026-04-22T10:00:00.000Z",
+      Date.now() - 3 * 60 * 60 * 1000,
     ).toISOString();
 
     const closed_event = await wait_for_socket_close(socket);
     expect(closed_event.reason).toBe("stale_session_timeout");
+    expect(runtime.session_registry.list_active_sessions()).toEqual([]);
+    expect(ingress.get_health_snapshot().active_proxy_connections).toBe(0);
+  } finally {
+    try {
+      socket.close();
+    } catch {
+      // ignore best-effort close
+    }
+
+    await ingress.stop();
+    await runtime.stop();
+  }
+});
+
+test("daemon ingress closes sockets whose sessions were closed elsewhere", async () => {
+  const daemon_port = random_port();
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: daemon_port + 1000,
+    session_idle_timeout_minutes: 120,
+  });
+
+  const ingress = new daemon_ingress_server({
+    runtime,
+    daemon_host: "127.0.0.1",
+    daemon_port,
+    bridge_host: "127.0.0.1",
+    bridge_port: daemon_port + 1000,
+    daemon_state_path: "/tmp/local-mcp-daemon-test.json",
+    idle_timeout_ms: 60_000,
+    cleanup_interval_ms: 25,
+    auth_enabled: false,
+    on_idle_timeout: async () => {},
+  });
+
+  const socket = new WebSocket(`ws://127.0.0.1:${daemon_port}/mcp`);
+
+  try {
+    await wait_for_socket_open(socket);
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "init",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: {
+            name: "cleanup-test",
+            version: "0.0.1",
+          },
+        },
+      })}\n`,
+    );
+
+    const initialize_response = await wait_for_initialize_response(socket);
+    const agent_session_id = initialize_response.result?.agent_session_id;
+    expect(typeof agent_session_id).toBe("string");
+
+    await runtime.tool_router.close_session(agent_session_id as string);
+
+    const closed_event = await wait_for_socket_close(socket);
+    expect(closed_event.reason).toBe("session_closed");
     expect(runtime.session_registry.list_active_sessions()).toEqual([]);
     expect(ingress.get_health_snapshot().active_proxy_connections).toBe(0);
   } finally {

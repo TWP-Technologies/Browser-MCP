@@ -79,8 +79,12 @@ function parse_positive_integer(input: string | undefined, fallback: number): nu
     return fallback;
   }
 
-  const parsed = Number.parseInt(configured, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (!/^\d+$/.test(configured)) {
+    return fallback;
+  }
+
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     return fallback;
   }
 
@@ -93,8 +97,12 @@ function parse_non_negative_integer(input: string | undefined, fallback: number)
     return fallback;
   }
 
-  const parsed = Number.parseInt(configured, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  if (!/^\d+$/.test(configured)) {
+    return fallback;
+  }
+
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
     return fallback;
   }
 

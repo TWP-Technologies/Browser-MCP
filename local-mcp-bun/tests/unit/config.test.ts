@@ -97,6 +97,7 @@ test("resolve_daemon_port accepts explicit values and guards invalid ones", () =
   expect(resolve_daemon_port({ MCP_DAEMON_PORT: "39000" }, 37777)).toBe(39000);
   expect(resolve_daemon_port({ MCP_DAEMON_PORT: "0" }, 37777)).toBe(37778);
   expect(resolve_daemon_port({ MCP_DAEMON_PORT: "70000" }, 37777)).toBe(37778);
+  expect(resolve_daemon_port({ MCP_DAEMON_PORT: "39000abc" }, 37777)).toBe(37778);
 });
 
 test("resolve_daemon timeout helpers apply defaults and parse env", () => {
@@ -111,4 +112,5 @@ test("resolve_session_idle_timeout_minutes defaults to 120 and accepts zero disa
   expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "0" })).toBe(0);
   expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "240" })).toBe(240);
   expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "-1" })).toBe(120);
+  expect(resolve_session_idle_timeout_minutes({ MCP_SESSION_IDLE_TIMEOUT_MINUTES: "120abc" })).toBe(120);
 });

@@ -4,7 +4,7 @@ interface stdio_proxy_server_options {
 }
 
 function is_graceful_daemon_close_reason(reason: string): boolean {
-  return reason === "stale_session_timeout" || reason === "stale_connection_timeout";
+  return reason === "stale_session_timeout" || reason === "stale_connection_timeout" || reason === "session_closed";
 }
 
 export class stdio_proxy_server {

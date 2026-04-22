@@ -8,6 +8,12 @@ function parse_test_bridge_port(): number {
   return Number.isInteger(parsed_port) && parsed_port > 0 && parsed_port <= 65535 ? parsed_port : 37777;
 }
 
+function sleep(timeout_ms: number): Promise<void> {
+  return new Promise((resolve_promise) => {
+    setTimeout(resolve_promise, timeout_ms);
+  });
+}
+
 const test_bridge_port = parse_test_bridge_port();
 const composition_schema_keys = ["oneOf", "anyOf", "allOf", "not"];
 
@@ -261,6 +267,69 @@ test("attach_to_tab enforces lock conflict and detach handoff", async () => {
   expect(attach_b.owner_agent_session_id).toBe(b);
 
   await runtime.stop();
+});
+
+test("attach_to_tab does not detach a tab after ownership transfers to a waiter", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const bridge = runtime.bridge_transport as in_memory_bridge_transport;
+  const original_attach_to_tab = bridge.attach_to_tab.bind(bridge);
+
+  const closing_session_id = runtime.tool_router.open_session("closing-agent").agent_session_id;
+  const waiting_session_id = runtime.tool_router.open_session("waiting-agent").agent_session_id;
+
+  let release_closing_attach: (() => void) | undefined;
+  const closing_attach_gate = new Promise<void>((resolve_promise) => {
+    release_closing_attach = resolve_promise;
+  });
+
+  bridge.attach_to_tab = async (tab_id, agent_session_id) => {
+    if (agent_session_id === closing_session_id) {
+      await closing_attach_gate;
+    }
+
+    await original_attach_to_tab(tab_id, agent_session_id);
+  };
+
+  try {
+    const closing_attach = runtime.tool_router.call_tool(closing_session_id, "attach_to_tab", { tab_id: 101 });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (runtime.tab_lock_manager.get_lock(101)?.owner_agent_session_id === closing_session_id) {
+        break;
+      }
+
+      await sleep(10);
+    }
+    expect(runtime.tab_lock_manager.get_lock(101)?.owner_agent_session_id).toBe(closing_session_id);
+
+    const waiting_attach = runtime.tool_router.call_tool(waiting_session_id, "attach_to_tab", {
+      tab_id: 101,
+      wait_timeout_ms: 1000,
+    });
+
+    await sleep(20);
+    await runtime.tool_router.close_session(closing_session_id);
+
+    const waiting_result = await waiting_attach;
+    expect(waiting_result.owner_agent_session_id).toBe(waiting_session_id);
+
+    release_closing_attach?.();
+
+    await expect(closing_attach).rejects.toMatchObject({
+      code: "SESSION_NOT_FOUND",
+    });
+
+    const tabs = await bridge.list_tabs(waiting_session_id);
+    expect(tabs.find((tab) => tab.tab_id === 101)?.debugger_attached).toBe(true);
+    expect(runtime.tab_lock_manager.get_lock(101)?.owner_agent_session_id).toBe(waiting_session_id);
+  } finally {
+    bridge.attach_to_tab = original_attach_to_tab;
+    await runtime.stop();
+  }
 });
 
 test("attach_to_tab supports wait_timeout_ms lock acquisition", async () => {
@@ -616,6 +685,28 @@ test("ui admin can update cleanup policy and close stale sessions", async () => 
   expect(cleanup_result.closed_session_ids).not.toContain(fresh_session_id);
   expect(cleanup_result.failed).toEqual([]);
   expect(runtime.session_registry.list_active_sessions()).toEqual([fresh_session_id]);
+
+  await runtime.stop();
+});
+
+test("run_stale_session_cleanup returns no stale sessions when the timeout is disabled", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("disabled-cleanup").agent_session_id;
+  runtime.session_registry.get_session(session_id).last_seen_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+
+  const cleanup_result = await runtime.tool_router.close_stale_sessions(0);
+  expect(cleanup_result).toEqual({
+    stale_session_timeout_minutes: 0,
+    stale_session_ids: [],
+    closed_session_ids: [],
+    failed: [],
+  });
+  expect(runtime.session_registry.list_active_sessions()).toEqual([session_id]);
 
   await runtime.stop();
 });

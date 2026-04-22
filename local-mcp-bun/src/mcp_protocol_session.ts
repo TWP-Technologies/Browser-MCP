@@ -218,7 +218,6 @@ export class mcp_protocol_session {
           throw new tool_error("INVALID_ARGUMENT", "session/close requires agent_session_id", false);
         }
 
-        this.touch_session(resolved_agent_session_id);
         const result = await this.runtime.tool_router.close_session(resolved_agent_session_id);
         if (this.initialized_agent_session_id === resolved_agent_session_id) {
           this.clear_initialized_agent_session_id();
@@ -300,6 +299,11 @@ export class mcp_protocol_session {
 
   private touch_initialized_session_if_present(): void {
     if (!this.initialized_agent_session_id) {
+      return;
+    }
+
+    if (!this.runtime.session_registry.has_session(this.initialized_agent_session_id)) {
+      this.clear_initialized_agent_session_id();
       return;
     }
 

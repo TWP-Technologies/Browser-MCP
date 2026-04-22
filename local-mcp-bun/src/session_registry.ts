@@ -2,13 +2,13 @@ import { generate_agent_session_id, now_iso_string } from "./id";
 import { tool_error } from "./errors";
 import type { agent_session, session_snapshot } from "./types";
 
-function parse_session_timestamp_ms(iso_timestamp: string): number {
+function parse_session_timestamp_ms(iso_timestamp: string): number | undefined {
   const parsed = Date.parse(iso_timestamp);
   if (Number.isFinite(parsed)) {
     return parsed;
   }
 
-  return 0;
+  return undefined;
 }
 
 export class session_registry {
@@ -98,6 +98,10 @@ export class session_registry {
 
     for (const session of this.sessions_by_id.values()) {
       const last_seen_at_ms = parse_session_timestamp_ms(session.last_seen_at);
+      if (typeof last_seen_at_ms !== "number") {
+        continue;
+      }
+
       if (last_seen_at_ms > stale_before_ms) {
         continue;
       }

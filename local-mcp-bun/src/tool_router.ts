@@ -350,6 +350,15 @@ export class tool_router {
     now_ms = Date.now(),
   ): Promise<stale_session_cleanup_result> {
     const resolved_timeout_minutes = parse_cleanup_timeout_minutes(stale_session_timeout_minutes);
+    if (resolved_timeout_minutes <= 0) {
+      return {
+        stale_session_timeout_minutes: resolved_timeout_minutes,
+        stale_session_ids: [],
+        closed_session_ids: [],
+        failed: [],
+      };
+    }
+
     const stale_session_ids = this.session_registry.list_stale_session_ids(resolved_timeout_minutes, now_ms);
     const closed_session_ids: string[] = [];
     const failed: stale_session_cleanup_result["failed"] = [];
@@ -1128,7 +1137,8 @@ export class tool_router {
         recommended_next_tools: ["browser_snapshot", "browser_lookup", "browser_navigate", "browser_interact"],
       };
     } catch (error) {
-      if (!this.session_registry.has_session(agent_session_id)) {
+      const current_lock = this.tab_lock_manager.get_lock(input.tab_id);
+      if (!this.session_registry.has_session(agent_session_id) && current_lock?.owner_agent_session_id === agent_session_id) {
         try {
           await this.bridge_transport.detach_from_tab(input.tab_id, agent_session_id);
         } catch {
@@ -1716,6 +1726,7 @@ export class tool_router {
       }
     }
 
+    this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
     await this.publish_connections_snapshot(reason);
     return {
       released_tab_ids,
