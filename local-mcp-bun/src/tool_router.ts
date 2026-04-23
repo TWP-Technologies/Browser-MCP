@@ -16,10 +16,26 @@ import type {
 
 interface router_options {
   auth_token?: string;
+  stale_session_timeout_minutes?: number;
 }
 
 interface close_all_sessions_result {
   attempted_session_ids: string[];
+  closed_session_ids: string[];
+  failed: Array<{
+    agent_session_id: string;
+    error: string;
+  }>;
+}
+
+interface close_session_result {
+  released_tab_ids: number[];
+  cancelled_waiting_tab_ids: number[];
+}
+
+interface stale_session_cleanup_result {
+  stale_session_timeout_minutes: number;
+  stale_session_ids: string[];
   closed_session_ids: string[];
   failed: Array<{
     agent_session_id: string;
@@ -76,6 +92,8 @@ const passthrough_tools = [
 const system_agent_session_id = "system-router";
 const artifact_root = resolve(process.cwd());
 const artifact_root_real = realpathSync(artifact_root);
+const default_stale_session_timeout_minutes = 120;
+const max_stale_session_timeout_minutes = 10_080;
 
 function render_learn_browser_mcp_prompt(_prompt_args: Record<string, unknown>): string {
   return [
@@ -214,12 +232,58 @@ function build_invalid_argument_details(options: invalid_argument_details_option
   return details;
 }
 
+function parse_cleanup_timeout_minutes(stale_session_timeout_minutes: unknown): number {
+  if (
+    typeof stale_session_timeout_minutes !== "number" ||
+    !Number.isInteger(stale_session_timeout_minutes) ||
+    stale_session_timeout_minutes < 0
+  ) {
+    throw new tool_error(
+      "INVALID_ARGUMENT",
+      "stale_session_timeout_minutes must be an integer greater than or equal to 0",
+      false,
+      {
+        stale_session_timeout_minutes,
+      },
+    );
+  }
+
+  if (stale_session_timeout_minutes > max_stale_session_timeout_minutes) {
+    throw new tool_error(
+      "INVALID_ARGUMENT",
+      `stale_session_timeout_minutes must be less than or equal to ${max_stale_session_timeout_minutes}`,
+      false,
+      {
+        stale_session_timeout_minutes,
+        max_stale_session_timeout_minutes,
+      },
+    );
+  }
+
+  return stale_session_timeout_minutes;
+}
+
+function dedupe_sorted_tab_ids(tab_ids: Array<number | undefined>): number[] {
+  const unique_tab_ids = new Set<number>();
+
+  for (const tab_id of tab_ids) {
+    if (typeof tab_id !== "number" || !Number.isInteger(tab_id) || tab_id <= 0) {
+      continue;
+    }
+
+    unique_tab_ids.add(tab_id);
+  }
+
+  return [...unique_tab_ids].sort((left, right) => left - right);
+}
+
 export class tool_router {
   private readonly session_registry: session_registry;
   private readonly tab_lock_manager: tab_lock_manager;
   private readonly bridge_transport: bridge_transport;
   private readonly auth_token?: string;
   private readonly active_tab_by_session: Map<string, number>;
+  private stale_session_timeout_minutes: number;
   private reconcile_in_progress: boolean;
 
   public constructor(
@@ -233,6 +297,10 @@ export class tool_router {
     this.bridge_transport = bridge_transport_instance;
     this.auth_token = options.auth_token;
     this.active_tab_by_session = new Map<string, number>();
+    this.stale_session_timeout_minutes =
+      typeof options.stale_session_timeout_minutes === "number"
+        ? parse_cleanup_timeout_minutes(options.stale_session_timeout_minutes)
+        : default_stale_session_timeout_minutes;
     this.reconcile_in_progress = false;
 
     this.bridge_transport.set_on_detach((tab_id) => {
@@ -262,26 +330,62 @@ export class tool_router {
     return { agent_session_id: session.agent_session_id };
   }
 
-  public async close_session(agent_session_id: string): Promise<{ released_tab_ids: number[] }> {
-    this.active_tab_by_session.delete(agent_session_id);
-    const released_tab_ids = this.session_registry.close_session(agent_session_id);
+  public get_stale_session_timeout_minutes(): number {
+    return this.stale_session_timeout_minutes;
+  }
 
-    for (const tab_id of released_tab_ids) {
-      try {
-        await this.bridge_transport.detach_from_tab(tab_id, agent_session_id);
-      } catch {
-        // Lock release is still required even if detach call fails.
-      }
+  public set_stale_session_timeout_minutes(stale_session_timeout_minutes: number): { stale_session_timeout_minutes: number } {
+    this.stale_session_timeout_minutes = parse_cleanup_timeout_minutes(stale_session_timeout_minutes);
+    return {
+      stale_session_timeout_minutes: this.stale_session_timeout_minutes,
+    };
+  }
 
+  public async run_stale_session_cleanup(now_ms = Date.now()): Promise<stale_session_cleanup_result> {
+    return await this.close_stale_sessions(this.stale_session_timeout_minutes, now_ms);
+  }
+
+  public async close_stale_sessions(
+    stale_session_timeout_minutes: number,
+    now_ms = Date.now(),
+  ): Promise<stale_session_cleanup_result> {
+    const resolved_timeout_minutes = parse_cleanup_timeout_minutes(stale_session_timeout_minutes);
+    if (resolved_timeout_minutes <= 0) {
+      return {
+        stale_session_timeout_minutes: resolved_timeout_minutes,
+        stale_session_ids: [],
+        closed_session_ids: [],
+        failed: [],
+      };
+    }
+
+    const stale_session_ids = this.session_registry.list_stale_session_ids(resolved_timeout_minutes, now_ms);
+    const closed_session_ids: string[] = [];
+    const failed: stale_session_cleanup_result["failed"] = [];
+
+    for (const agent_session_id of stale_session_ids) {
       try {
-        this.tab_lock_manager.release_lock(tab_id, agent_session_id);
-      } catch {
-        // Lock may already be released.
+        await this.close_session_with_reason(agent_session_id, "stale_session_cleanup");
+        closed_session_ids.push(agent_session_id);
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        failed.push({
+          agent_session_id,
+          error: mapped_error.message,
+        });
       }
     }
 
-    await this.publish_connections_snapshot("close_session");
-    return { released_tab_ids };
+    return {
+      stale_session_timeout_minutes: resolved_timeout_minutes,
+      stale_session_ids,
+      closed_session_ids,
+      failed,
+    };
+  }
+
+  public async close_session(agent_session_id: string): Promise<close_session_result> {
+    return await this.close_session_with_reason(agent_session_id, "close_session");
   }
 
   public list_tools(): Array<Record<string, unknown>> {
@@ -849,6 +953,7 @@ export class tool_router {
 
   public async release_locks_for_session(agent_session_id: string): Promise<number[]> {
     const released_tab_ids = this.tab_lock_manager.release_locks_by_owner(agent_session_id);
+    this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
     this.active_tab_by_session.delete(agent_session_id);
 
     for (const tab_id of released_tab_ids) {
@@ -869,6 +974,7 @@ export class tool_router {
       "Use prompts/get name=learn_browser_mcp or tools/call learn_browser_mcp if the tool surface is unfamiliar.",
       "Any browser_* tool requires an attached tab. Either list tabs and attach with browser_tabs action='attach' or attach_to_tab, or create a new tab with browser_tabs action='new', which attaches automatically.",
       "browser_network_requests only captures requests observed after attach and later navigation/reload.",
+      "When you are done, prefer detach_from_tab for owned tabs and session/close for explicit session shutdown.",
     ].join(" ");
   }
 
@@ -1013,8 +1119,10 @@ export class tool_router {
     const lock = await this.tab_lock_manager.acquire_lock(input.tab_id, agent_session_id, input.wait_timeout_ms);
 
     try {
+      this.assert_session_is_active(agent_session_id);
       this.tab_lock_manager.set_lock_state(input.tab_id, "pending_attach");
       await this.bridge_transport.attach_to_tab(input.tab_id, agent_session_id);
+      this.assert_session_is_active(agent_session_id);
       this.tab_lock_manager.set_lock_state(input.tab_id, "attached");
       this.session_registry.mark_tab_owned(agent_session_id, input.tab_id);
       this.active_tab_by_session.set(agent_session_id, input.tab_id);
@@ -1029,6 +1137,15 @@ export class tool_router {
         recommended_next_tools: ["browser_snapshot", "browser_lookup", "browser_navigate", "browser_interact"],
       };
     } catch (error) {
+      const current_lock = this.tab_lock_manager.get_lock(input.tab_id);
+      if (!this.session_registry.has_session(agent_session_id) && current_lock?.owner_agent_session_id === agent_session_id) {
+        try {
+          await this.bridge_transport.detach_from_tab(input.tab_id, agent_session_id);
+        } catch {
+          // best-effort cleanup if the session closed during attach
+        }
+      }
+
       try {
         this.tab_lock_manager.release_lock(input.tab_id, agent_session_id);
       } catch {
@@ -1037,7 +1154,7 @@ export class tool_router {
 
       const mapped_error = to_tool_error(error);
 
-      if (mapped_error.code === "ATTACH_FAILED") {
+      if (mapped_error.code === "ATTACH_FAILED" || mapped_error.code === "SESSION_NOT_FOUND") {
         throw mapped_error;
       }
 
@@ -1144,6 +1261,16 @@ export class tool_router {
       tab_id,
       wait_timeout_ms: wait_timeout_ms as number | undefined,
     };
+  }
+
+  private assert_session_is_active(agent_session_id: string): void {
+    if (this.session_registry.has_session(agent_session_id)) {
+      return;
+    }
+
+    throw new tool_error("SESSION_NOT_FOUND", `unknown session: ${agent_session_id}`, false, {
+      agent_session_id,
+    });
   }
 
   private parse_detach_args(agent_session_id: string, args: Record<string, unknown>): detach_from_tab_input {
@@ -1482,6 +1609,46 @@ export class tool_router {
       };
     }
 
+    if (action === "set_cleanup_policy") {
+      const stale_session_timeout_minutes = payload.stale_session_timeout_minutes;
+      if (typeof stale_session_timeout_minutes !== "number") {
+        return {
+          ok: false,
+          error: "set_cleanup_policy requires numeric stale_session_timeout_minutes",
+        };
+      }
+
+      try {
+        const result = this.set_stale_session_timeout_minutes(stale_session_timeout_minutes);
+        return {
+          ok: true,
+          result,
+        };
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        return {
+          ok: false,
+          error: mapped_error.message,
+        };
+      }
+    }
+
+    if (action === "run_stale_session_cleanup") {
+      try {
+        const result = await this.run_stale_session_cleanup();
+        return {
+          ok: true,
+          result,
+        };
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        return {
+          ok: false,
+          error: mapped_error.message,
+        };
+      }
+    }
+
     if (action === "detach_tab_lock") {
       const tab_id = payload.tab_id;
       if (typeof tab_id !== "number" || !Number.isInteger(tab_id) || tab_id <= 0) {
@@ -1528,6 +1695,45 @@ export class tool_router {
     return {
       ok: false,
       error: `unsupported ui_admin_request action: ${action}`,
+    };
+  }
+
+  private async close_session_with_reason(
+    agent_session_id: string,
+    reason: string,
+  ): Promise<close_session_result> {
+    const session = this.session_registry.get_session(agent_session_id);
+    const held_lock_tab_ids = this.tab_lock_manager.list_owned_tab_ids(agent_session_id);
+    const released_owned_tab_ids = [...session.owned_tab_ids];
+    const cancelled_waiting_tab_ids = this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
+    const active_tab_id = this.active_tab_by_session.get(agent_session_id);
+
+    this.active_tab_by_session.delete(agent_session_id);
+    this.session_registry.close_session(agent_session_id);
+
+    const released_tab_ids = dedupe_sorted_tab_ids([...held_lock_tab_ids, ...released_owned_tab_ids, active_tab_id]);
+    for (const tab_id of released_tab_ids) {
+      try {
+        await this.bridge_transport.detach_from_tab(tab_id, agent_session_id);
+      } catch {
+        // Lock release is still required even if detach call fails.
+      }
+
+      try {
+        this.tab_lock_manager.release_lock(tab_id, agent_session_id);
+      } catch {
+        // Lock may already be released or transferred by a detach notice.
+      }
+    }
+
+    const newly_cancelled_waiting_tab_ids = this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
+    await this.publish_connections_snapshot(reason);
+    return {
+      released_tab_ids,
+      cancelled_waiting_tab_ids: dedupe_sorted_tab_ids([
+        ...cancelled_waiting_tab_ids,
+        ...newly_cancelled_waiting_tab_ids,
+      ]),
     };
   }
 

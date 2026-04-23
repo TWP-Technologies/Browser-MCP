@@ -4,6 +4,7 @@ import {
   resolve_daemon_idle_timeout_ms,
   resolve_daemon_mode,
   resolve_daemon_port,
+  resolve_session_idle_timeout_minutes,
 } from "./config";
 import { resolve_daemon_state_path, run_daemon_mode } from "./daemon_controller";
 
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
   const daemon_port = resolve_daemon_port(env, bridge_port);
   const daemon_idle_timeout_ms = resolve_daemon_idle_timeout_ms(env);
   const daemon_connect_timeout_ms = resolve_daemon_connect_timeout_ms(env);
+  const session_idle_timeout_minutes = resolve_session_idle_timeout_minutes(env);
   const daemon_state_path = resolve_daemon_state_path(env, daemon_port);
 
   await run_daemon_mode({
@@ -53,6 +55,7 @@ async function main(): Promise<void> {
       bridge_mode,
       bridge_host,
       bridge_port,
+      session_idle_timeout_minutes,
     },
     env,
   });

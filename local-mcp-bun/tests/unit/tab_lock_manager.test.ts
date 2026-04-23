@@ -37,6 +37,23 @@ test("tab_lock_manager transfers lock to waiter when owner releases", async () =
   expect(lock.owner_agent_session_id).toBe("session-b");
 });
 
+test("tab_lock_manager cancels queued waiters by owner", async () => {
+  const manager = new tab_lock_manager();
+  await manager.acquire_lock(14, "session-a");
+
+  const waiter = manager.acquire_lock(14, "session-b", 500);
+  const cancelled_tab_ids = manager.cancel_waiters_by_owner("session-b");
+  expect(cancelled_tab_ids).toEqual([14]);
+
+  try {
+    await waiter;
+    throw new Error("expected waiter cancellation");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("SESSION_NOT_FOUND");
+  }
+});
+
 
 test("tab_lock_manager can release all locks by owner", async () => {
   const manager = new tab_lock_manager();
