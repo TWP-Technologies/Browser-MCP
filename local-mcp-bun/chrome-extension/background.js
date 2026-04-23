@@ -984,7 +984,21 @@ async function refresh_cleanup_policy_from_service(force = false) {
     notify_ui_state_change();
     return true;
   } finally {
+    const should_sync_local_override =
+      cleanup_policy_sync_pending &&
+      cleanup_policy_has_local_override &&
+      bridge_socket &&
+      bridge_socket.readyState === WebSocket.OPEN &&
+      bridge_connection_state === "open";
+
     cleanup_policy_request_in_flight = false;
+    if (should_sync_local_override) {
+      queueMicrotask(() => {
+        sync_cleanup_policy_to_service().catch((error) => {
+          log_warn("cleanup policy sync after refresh preemption failed", error);
+        });
+      });
+    }
   }
 }
 

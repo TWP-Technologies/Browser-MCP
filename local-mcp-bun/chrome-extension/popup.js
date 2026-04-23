@@ -1,3 +1,4 @@
+// Modified by [KnotFalse]
 // chrome-extension/popup_view_model.ts
 function pad_2(value) {
   return String(value).padStart(2, "0");
@@ -957,7 +958,7 @@ function render() {
             class="chip chip--button ${cleanup_chip_class}"
             data-action="open-cleanup-modal"
             data-testid="cleanup-chip"
-            ${disable_non_toggle_actions || !cleanup_policy_loaded ? "disabled" : ""}
+            ${disable_non_toggle_actions ? "disabled" : ""}
           >
             ${escape_html(`${cleanup_chip_label}${cleanup_chip_suffix}`)}
           </button>

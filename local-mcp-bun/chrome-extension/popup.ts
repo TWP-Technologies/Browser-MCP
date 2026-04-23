@@ -1209,7 +1209,7 @@ function render(): void {
             class="chip chip--button ${cleanup_chip_class}"
             data-action="open-cleanup-modal"
             data-testid="cleanup-chip"
-            ${disable_non_toggle_actions || !cleanup_policy_loaded ? "disabled" : ""}
+            ${disable_non_toggle_actions ? "disabled" : ""}
           >
             ${escape_html(`${cleanup_chip_label}${cleanup_chip_suffix}`)}
           </button>
