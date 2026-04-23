@@ -782,7 +782,7 @@ function connect_bridge(reason = "manual") {
       log_warn("tabs update on open failed", error);
     });
 
-    sync_cleanup_policy_to_service().catch((error) => {
+    sync_cleanup_policy_to_service(true).catch((error) => {
       log_warn("cleanup policy sync on open failed", error);
     });
 
@@ -930,12 +930,16 @@ async function send_ui_admin_request(action, payload) {
   });
 }
 
-async function sync_cleanup_policy_to_service() {
+async function sync_cleanup_policy_to_service(force = false) {
   if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
     return false;
   }
-  if (!cleanup_policy_sync_pending || cleanup_policy_sync_in_flight) {
+  if ((!cleanup_policy_sync_pending && !force) || cleanup_policy_sync_in_flight) {
     return false;
+  }
+
+  if (force) {
+    cleanup_policy_sync_pending = true;
   }
 
   cleanup_policy_sync_in_flight = true;
@@ -957,15 +961,16 @@ async function sync_cleanup_policy_to_service() {
       return false;
     }
 
+    if (sync_generation !== cleanup_policy_sync_generation) {
+      return false;
+    }
+
     stale_session_timeout_minutes = synced_timeout_minutes;
     await chrome.storage.local.set({
       stale_session_timeout_minutes: synced_timeout_minutes,
     });
 
     if (sync_generation !== cleanup_policy_sync_generation) {
-      await chrome.storage.local.set({
-        stale_session_timeout_minutes,
-      });
       return false;
     }
 

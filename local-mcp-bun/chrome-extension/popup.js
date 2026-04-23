@@ -64,6 +64,14 @@ function count_overdue_sessions(sessions, stale_session_timeout_minutes, now_ms 
 // chrome-extension/popup.ts
 var browser_api = chrome;
 var app_root = document.getElementById("app");
+var modal_focusable_selector = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  '[tabindex]:not([tabindex="-1"])'
+].join(", ");
 var ui_state = null;
 var loading = false;
 var action_in_flight = false;
@@ -96,6 +104,9 @@ var cleanup_modal_open = false;
 var cleanup_modal_enabled = true;
 var cleanup_modal_minutes_input = "120";
 var cleanup_modal_busy_action = null;
+var active_modal_kind = null;
+var modal_restore_focus_target = null;
+var modal_restore_focus_selector = null;
 function escape_html(input) {
   return String(input).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -121,12 +132,34 @@ function set_info_banner(message) {
   info_message = message;
   error_message = "";
 }
+function capture_modal_restore_focus_target() {
+  const active_element = document.activeElement;
+  modal_restore_focus_target = active_element instanceof HTMLElement ? active_element : null;
+  modal_restore_focus_selector = resolve_focus_restore_selector(modal_restore_focus_target);
+}
 function resolve_cleanup_timeout_minutes() {
   const timeout_minutes = ui_state?.stale_session_timeout_minutes;
   if (typeof timeout_minutes === "number" && Number.isInteger(timeout_minutes) && timeout_minutes >= 0) {
     return timeout_minutes;
   }
   return 120;
+}
+function resolve_focus_restore_selector(element) {
+  if (!element) {
+    return null;
+  }
+  const test_id = element.getAttribute("data-testid");
+  if (test_id) {
+    return `[data-testid="${test_id}"]`;
+  }
+  const action = element.getAttribute("data-action");
+  if (action) {
+    return `[data-action="${action}"]`;
+  }
+  if (element.id) {
+    return `#${element.id}`;
+  }
+  return null;
 }
 function resolve_bridge_ui_mode(extension_enabled, state) {
   if (!extension_enabled) {
@@ -428,6 +461,9 @@ function get_active_session_count() {
   return sessions.filter((session) => typeof session?.agent_session_id === "string").length;
 }
 function set_disable_modal_state(open, busy = false) {
+  if (open && !disable_modal_open && !cleanup_modal_open) {
+    capture_modal_restore_focus_target();
+  }
   disable_modal_open = open;
   disable_modal_busy = busy;
   render();
@@ -537,6 +573,9 @@ async function drain_toggle_queue() {
 }
 function set_cleanup_modal_state(open) {
   if (open) {
+    if (!cleanup_modal_open && !disable_modal_open) {
+      capture_modal_restore_focus_target();
+    }
     const timeout_minutes = resolve_cleanup_timeout_minutes();
     cleanup_modal_enabled = timeout_minutes > 0;
     cleanup_modal_minutes_input = String(timeout_minutes > 0 ? timeout_minutes : 120);
@@ -559,6 +598,90 @@ function parse_cleanup_minutes_input() {
     throw new Error("Cleanup minutes must be an integer between 1 and 10080");
   }
   return parsed_timeout_minutes;
+}
+function resolve_open_modal_kind() {
+  if (cleanup_modal_open) {
+    return "cleanup";
+  }
+  if (disable_modal_open) {
+    return "disable";
+  }
+  return null;
+}
+function resolve_modal_card(kind) {
+  if (!app_root) {
+    return null;
+  }
+  const selector = kind === "cleanup" ? '[data-testid="cleanup-modal-backdrop"] .modal-card' : '[data-testid="disable-modal-backdrop"] .modal-card';
+  const modal_card = app_root.querySelector(selector);
+  return modal_card instanceof HTMLElement ? modal_card : null;
+}
+function resolve_modal_fallback_focus_target(kind) {
+  if (!app_root) {
+    return null;
+  }
+  const selector = kind === "cleanup" ? '[data-testid="cleanup-chip"]' : '[data-testid="toggle-enabled-btn"]';
+  const focus_target = app_root.querySelector(selector);
+  return focus_target instanceof HTMLElement ? focus_target : null;
+}
+function list_modal_focusable_elements(modal_card) {
+  return Array.from(modal_card.querySelectorAll(modal_focusable_selector)).filter((element) => {
+    if (element.hasAttribute("disabled") || element.getAttribute("aria-hidden") === "true") {
+      return false;
+    }
+    return element.getClientRects().length > 0;
+  });
+}
+function focus_modal_entry_target(modal_card) {
+  const focusable_elements = list_modal_focusable_elements(modal_card);
+  const focus_target = focusable_elements[0] ?? modal_card;
+  if (!modal_card.hasAttribute("tabindex")) {
+    modal_card.tabIndex = -1;
+  }
+  focus_target.focus();
+}
+function restore_modal_focus(kind) {
+  const preserved_target = modal_restore_focus_target instanceof HTMLElement && modal_restore_focus_target.isConnected ? modal_restore_focus_target : null;
+  const selector_target = modal_restore_focus_selector && app_root ? app_root.querySelector(modal_restore_focus_selector) : null;
+  const fallback_target = resolve_modal_fallback_focus_target(kind);
+  const focus_target = preserved_target ?? (selector_target instanceof HTMLElement ? selector_target : null) ?? fallback_target;
+  modal_restore_focus_target = null;
+  modal_restore_focus_selector = null;
+  if (!focus_target) {
+    return;
+  }
+  focus_target.focus();
+}
+function sync_modal_accessibility_dom() {
+  if (!app_root) {
+    return;
+  }
+  const content_root = app_root.querySelector("[data-modal-content-root]");
+  const next_modal_kind = resolve_open_modal_kind();
+  if (content_root instanceof HTMLElement) {
+    content_root.toggleAttribute("inert", next_modal_kind !== null);
+    if (next_modal_kind !== null) {
+      content_root.setAttribute("aria-hidden", "true");
+    } else {
+      content_root.removeAttribute("aria-hidden");
+    }
+  }
+  if (next_modal_kind === null) {
+    if (active_modal_kind !== null) {
+      restore_modal_focus(active_modal_kind);
+    }
+    active_modal_kind = null;
+    return;
+  }
+  const modal_card = resolve_modal_card(next_modal_kind);
+  active_modal_kind = next_modal_kind;
+  if (!modal_card) {
+    return;
+  }
+  const active_element = document.activeElement;
+  if (!(active_element instanceof HTMLElement) || !modal_card.contains(active_element)) {
+    focus_modal_entry_target(modal_card);
+  }
 }
 function summarize_stale_cleanup_result(payload) {
   const failed_rows = Array.isArray(payload.failed) ? payload.failed : [];
@@ -790,7 +913,8 @@ function render() {
   const cleanup_chip_class = overdue_session_count > 0 ? "chip--state-pending" : stale_session_timeout_minutes > 0 ? "chip--muted" : "chip--state-offline";
   app_root.innerHTML = `
     <div class="surface">
-      ${error_message ? `<div class="error-banner" role="alert">
+      <div class="surface__content" data-modal-content-root>
+        ${error_message ? `<div class="error-banner" role="alert">
               <span class="error-banner__glyph">!</span>
               <span>${escape_html(error_message)}</span>
             </div>` : ""}
@@ -925,6 +1049,7 @@ function render() {
         </header>
         ${render_session_rows(sorted_sessions, disable_non_toggle_actions, stale_session_timeout_minutes, now_ms)}
       </section>
+      </div>
       <div class="modal-backdrop ${cleanup_modal_open ? "" : "modal-backdrop--hidden"}" data-testid="cleanup-modal-backdrop">
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cleanup-modal-title">
           <h3 id="cleanup-modal-title">Session Auto-cleanup</h3>
@@ -980,6 +1105,7 @@ function render() {
   `;
   sync_waiting_ui_effects();
   sync_bridge_url_copy_dom();
+  sync_modal_accessibility_dom();
 }
 function register_event_listeners() {
   if (!app_root) {
@@ -995,6 +1121,56 @@ function register_event_listeners() {
       return;
     }
     mark_ui_interaction_guard();
+  }, true);
+  app_root.addEventListener("keydown", (event) => {
+    if (!(event instanceof KeyboardEvent)) {
+      return;
+    }
+    const modal_kind = resolve_open_modal_kind();
+    if (!modal_kind) {
+      return;
+    }
+    if (event.key === "Escape") {
+      if (modal_kind === "cleanup" && cleanup_modal_busy_action === null) {
+        event.preventDefault();
+        set_cleanup_modal_state(false);
+      }
+      if (modal_kind === "disable" && !disable_modal_busy) {
+        event.preventDefault();
+        set_disable_modal_state(false, false);
+      }
+      return;
+    }
+    if (event.key !== "Tab") {
+      return;
+    }
+    const modal_card = resolve_modal_card(modal_kind);
+    if (!modal_card) {
+      return;
+    }
+    const focusable_elements = list_modal_focusable_elements(modal_card);
+    if (focusable_elements.length === 0) {
+      event.preventDefault();
+      modal_card.focus();
+      return;
+    }
+    const first_focusable = focusable_elements[0] ?? modal_card;
+    const last_focusable = focusable_elements[focusable_elements.length - 1] ?? modal_card;
+    const active_element = document.activeElement;
+    if (!(active_element instanceof HTMLElement) || !modal_card.contains(active_element)) {
+      event.preventDefault();
+      (event.shiftKey ? last_focusable : first_focusable).focus();
+      return;
+    }
+    if (!event.shiftKey && active_element === last_focusable) {
+      event.preventDefault();
+      first_focusable.focus();
+      return;
+    }
+    if (event.shiftKey && active_element === first_focusable) {
+      event.preventDefault();
+      last_focusable.focus();
+    }
   }, true);
   app_root.addEventListener("keydown", (event) => {
     const target = event.target;

@@ -132,6 +132,10 @@ body::before {
 }
 
 .surface {
+  position: relative;
+}
+
+.surface__content {
   display: grid;
   gap: 10px;
 }
