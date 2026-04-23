@@ -868,6 +868,7 @@ function render_session_rows(
   sessions: session_snapshot[],
   disable_all: boolean,
   stale_session_timeout_minutes: number,
+  now_ms: number,
 ): string {
   if (sessions.length === 0) {
     return '<p class="empty-state">No active sessions. Agent connections will appear here once connected.</p>';
@@ -889,7 +890,7 @@ function render_session_rows(
       .map((session) => {
         const client_name = session.client_name && session.client_name.length > 0 ? session.client_name : "-";
         const owned_tabs = session.owned_tab_ids.length > 0 ? session.owned_tab_ids.join(", ") : "-";
-        const overdue = is_session_overdue(session, stale_session_timeout_minutes);
+        const overdue = is_session_overdue(session, stale_session_timeout_minutes, now_ms);
         const state_chip_class =
           session.state === "connected" ? "chip--state-online" : session.state === "disconnecting" ? "chip--state-pending" : "chip--state-offline";
 
@@ -949,7 +950,8 @@ function render(): void {
     .filter((session) => typeof session.agent_session_id === "string")
     .sort((left, right) => left.agent_session_id.localeCompare(right.agent_session_id));
   const active_session_count = sorted_sessions.length;
-  const overdue_session_count = count_overdue_sessions(sorted_sessions, stale_session_timeout_minutes);
+  const now_ms = Date.now();
+  const overdue_session_count = count_overdue_sessions(sorted_sessions, stale_session_timeout_minutes, now_ms);
 
   const disable_non_toggle_actions =
     loading || action_in_flight || toggle_in_flight || disable_modal_busy || cleanup_modal_busy_action !== null;
@@ -1116,7 +1118,7 @@ function render(): void {
           <h2>Active Sessions</h2>
           <p>Session lifecycle state with direct termination controls.</p>
         </header>
-        ${render_session_rows(sorted_sessions, disable_non_toggle_actions, stale_session_timeout_minutes)}
+        ${render_session_rows(sorted_sessions, disable_non_toggle_actions, stale_session_timeout_minutes, now_ms)}
       </section>
       <div class="modal-backdrop ${cleanup_modal_open ? "" : "modal-backdrop--hidden"}" data-testid="cleanup-modal-backdrop">
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cleanup-modal-title">

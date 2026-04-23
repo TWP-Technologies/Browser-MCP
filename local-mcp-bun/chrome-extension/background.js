@@ -936,6 +936,9 @@ async function sync_cleanup_policy_to_service() {
   const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
   if (synced_timeout_minutes !== null) {
     stale_session_timeout_minutes = synced_timeout_minutes;
+    await chrome.storage.local.set({
+      stale_session_timeout_minutes: synced_timeout_minutes,
+    });
   }
 
   cleanup_policy_sync_pending = false;
