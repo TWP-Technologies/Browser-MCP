@@ -1,5 +1,36 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-04-22
+
+### Implemented
+
+- Added service-authoritative stale-session cleanup with `MCP_SESSION_IDLE_TIMEOUT_MINUTES` (default `120`, `0` disables).
+- Tightened session liveness tracking so valid inbound MCP traffic refreshes `last_seen_at` outside of `tools/call`.
+- Added hard-reap cleanup semantics:
+  - stale sessions close through one shared path,
+  - queued lock waiters are cancelled by owner,
+  - attach flow re-checks session liveness after waited lock acquisition and after debugger attach,
+  - stale sessions cannot resurrect and attach later after being closed.
+- Added daemon ingress cleanup sweeps that:
+  - reap stale sessions,
+  - close bound ingress sockets with `stale_session_timeout`,
+  - close unbound idle ingress sockets with `stale_connection_timeout`,
+  - expose `active_sessions` and `stale_session_timeout_minutes` in `/health`.
+- Updated stdio proxy behavior so daemon-initiated stale cleanup closes proxy processes cleanly.
+- Added direct-mode stale cleanup sweeps without auto-exiting the direct process.
+- Added extension cleanup policy controls:
+  - persisted timeout in `chrome.storage.local`,
+  - sync-on-connect plus retry-on-heartbeat policy propagation to the service,
+  - compact `Auto-cleanup` chip in the popup with modal controls for enable/disable, minutes, and `Run Cleanup Now`,
+  - overdue session badges in the active sessions table.
+- Added regression coverage for stale session selection, waiter cancellation, daemon ingress socket cleanup, popup cleanup view-model helpers, and waiting-session attach cancellation.
+
+### Verification
+
+- `./node_modules/.bin/tsc -p ./chrome-extension/tsconfig.popup.json --noEmit` passed.
+- `bun test local-mcp-bun/tests/unit/config.test.ts local-mcp-bun/tests/unit/session_registry.test.ts local-mcp-bun/tests/unit/tab_lock_manager.test.ts local-mcp-bun/tests/unit/popup_view_model.test.ts local-mcp-bun/tests/concurrency/lock_contention.test.ts local-mcp-bun/tests/integration/tool_router.test.ts local-mcp-bun/tests/integration/daemon_ingress_cleanup.test.ts local-mcp-bun/tests/integration/daemon_singleton_proxy.test.ts` passed.
+- `bun run --cwd local-mcp-bun build:popup-ui` passed.
+
 ## 2026-04-14
 
 ### Implemented
