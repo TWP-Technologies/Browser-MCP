@@ -550,7 +550,11 @@ function set_cleanup_modal_state(open) {
   render();
 }
 function parse_cleanup_minutes_input() {
-  const parsed_timeout_minutes = Number.parseInt(cleanup_modal_minutes_input, 10);
+  const normalized_input = cleanup_modal_minutes_input.trim();
+  if (!/^\d+$/.test(normalized_input)) {
+    throw new Error("Cleanup minutes must be an integer between 1 and 10080");
+  }
+  const parsed_timeout_minutes = Number(normalized_input);
   if (!Number.isInteger(parsed_timeout_minutes) || parsed_timeout_minutes < 1 || parsed_timeout_minutes > 10080) {
     throw new Error("Cleanup minutes must be an integer between 1 and 10080");
   }
@@ -602,6 +606,9 @@ async function run_cleanup_modal_save() {
 }
 async function run_cleanup_now() {
   if (action_in_flight || toggle_in_flight || cleanup_modal_busy_action !== null) {
+    return;
+  }
+  if ((ui_state?.bridge_connection_state ?? "idle") !== "open") {
     return;
   }
   cleanup_modal_busy_action = "run";
@@ -777,6 +784,7 @@ function render() {
   const waiting_hint_label = resolve_waiting_hint(ui_state, bridge_mode);
   const bridge_url_copy_button_label = resolve_bridge_url_copy_button_label();
   const bridge_url_copy_status_label = resolve_bridge_url_copy_status_label();
+  const bridge_open = bridge_connection_state === "open";
   const cleanup_chip_label = format_cleanup_chip_label(stale_session_timeout_minutes);
   const cleanup_chip_suffix = overdue_session_count > 0 ? ` · ${overdue_session_count} overdue` : "";
   const cleanup_chip_class = overdue_session_count > 0 ? "chip--state-pending" : stale_session_timeout_minutes > 0 ? "chip--muted" : "chip--state-offline";
@@ -944,7 +952,7 @@ function render() {
           </label>
           <div class="modal-actions">
             <button class="btn btn--ghost" data-action="cleanup-modal-cancel" ${cleanup_modal_busy_action !== null ? "disabled" : ""}>Cancel</button>
-            <button class="btn btn--ghost" data-action="cleanup-modal-run-now" ${cleanup_modal_busy_action !== null ? "disabled" : ""}>
+            <button class="btn btn--ghost" data-action="cleanup-modal-run-now" ${cleanup_modal_busy_action !== null || !bridge_open ? "disabled" : ""}>
               ${cleanup_modal_busy_action === "run" ? "Cleaning..." : "Run Cleanup Now"}
             </button>
             <button class="btn btn--primary" data-action="cleanup-modal-save" ${cleanup_modal_busy_action !== null ? "disabled" : ""}>

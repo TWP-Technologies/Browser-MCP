@@ -34,6 +34,8 @@ let bridge_url = default_bridge_url;
 let mcp_port = default_mcp_port;
 let stale_session_timeout_minutes = default_stale_session_timeout_minutes;
 let cleanup_policy_sync_pending = true;
+let cleanup_policy_sync_in_flight = false;
+let cleanup_policy_sync_generation = 0;
 let extension_enabled = true;
 let heartbeat_timer = null;
 let bridge_connection_state = "idle";
@@ -932,24 +934,61 @@ async function sync_cleanup_policy_to_service() {
   if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
     return false;
   }
-
-  const result = await send_ui_admin_request("set_cleanup_policy", {
-    stale_session_timeout_minutes,
-  });
-  const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
-  if (synced_timeout_minutes === null) {
-    console.warn("cleanup policy sync returned an invalid timeout echo", result?.stale_session_timeout_minutes);
-    notify_ui_state_change();
+  if (!cleanup_policy_sync_pending || cleanup_policy_sync_in_flight) {
     return false;
   }
 
-  stale_session_timeout_minutes = synced_timeout_minutes;
-  await chrome.storage.local.set({
-    stale_session_timeout_minutes: synced_timeout_minutes,
-  });
-  cleanup_policy_sync_pending = false;
-  notify_ui_state_change();
-  return true;
+  cleanup_policy_sync_in_flight = true;
+  const sync_generation = cleanup_policy_sync_generation;
+  const requested_timeout_minutes = stale_session_timeout_minutes;
+
+  try {
+    const result = await send_ui_admin_request("set_cleanup_policy", {
+      stale_session_timeout_minutes: requested_timeout_minutes,
+    });
+    if (sync_generation !== cleanup_policy_sync_generation) {
+      return false;
+    }
+
+    const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
+    if (synced_timeout_minutes === null) {
+      console.warn("cleanup policy sync returned an invalid timeout echo", result?.stale_session_timeout_minutes);
+      notify_ui_state_change();
+      return false;
+    }
+
+    stale_session_timeout_minutes = synced_timeout_minutes;
+    await chrome.storage.local.set({
+      stale_session_timeout_minutes: synced_timeout_minutes,
+    });
+
+    if (sync_generation !== cleanup_policy_sync_generation) {
+      await chrome.storage.local.set({
+        stale_session_timeout_minutes,
+      });
+      return false;
+    }
+
+    cleanup_policy_sync_pending = false;
+    notify_ui_state_change();
+    return true;
+  } finally {
+    const should_retry =
+      cleanup_policy_sync_pending &&
+      sync_generation !== cleanup_policy_sync_generation &&
+      bridge_socket &&
+      bridge_socket.readyState === WebSocket.OPEN &&
+      bridge_connection_state === "open";
+
+    cleanup_policy_sync_in_flight = false;
+    if (should_retry) {
+      queueMicrotask(() => {
+        sync_cleanup_policy_to_service().catch((error) => {
+          log_warn("cleanup policy resync failed", error);
+        });
+      });
+    }
+  }
 }
 
 async function sync_tabs_snapshot(send_update = true) {
@@ -1035,6 +1074,7 @@ async function set_stale_session_timeout_policy(next_timeout_minutes) {
   }
 
   stale_session_timeout_minutes = validated_timeout_minutes;
+  cleanup_policy_sync_generation += 1;
   cleanup_policy_sync_pending = true;
   await chrome.storage.local.set({
     stale_session_timeout_minutes,
