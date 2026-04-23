@@ -132,6 +132,10 @@ body::before {
 }
 
 .surface {
+  position: relative;
+}
+
+.surface__content {
   display: grid;
   gap: 10px;
 }
@@ -330,6 +334,28 @@ h3 {
 .chip--muted {
   border-color: var(--line);
   color: var(--ink-muted);
+}
+
+.chip--button {
+  appearance: none;
+  cursor: pointer;
+  background: rgba(9, 20, 33, 0.42);
+}
+
+.chip--button:hover:not(:disabled) {
+  border-color: rgba(149, 188, 232, 0.74);
+  box-shadow: 0 6px 16px rgba(2, 8, 15, 0.35);
+}
+
+.chip--button:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px rgba(157, 210, 255, 0.24);
+}
+
+.chip--button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .poll-meta {
@@ -681,6 +707,12 @@ tbody tr:last-child td {
   word-break: break-word;
 }
 
+.session-state-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .empty-state {
   margin-top: 9px;
   border: 1px dashed rgba(108, 140, 178, 0.34);
@@ -716,6 +748,18 @@ tbody tr:last-child td {
   line-height: 1;
 }
 
+.error-banner--info {
+  border-color: rgba(123, 226, 164, 0.46);
+  background: linear-gradient(180deg, rgba(16, 45, 32, 0.95) 0%, rgba(12, 34, 25, 0.95) 100%);
+  color: #dcffe8;
+  box-shadow: 0 8px 18px rgba(6, 24, 16, 0.4);
+}
+
+.error-banner__glyph--info {
+  background: rgba(123, 226, 164, 0.18);
+  border-color: rgba(123, 226, 164, 0.42);
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -746,6 +790,39 @@ tbody tr:last-child td {
   color: var(--ink-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.modal-field {
+  display: grid;
+  gap: 6px;
+}
+
+.modal-field span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.modal-field--toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(10, 18, 30, 0.42);
+}
+
+.modal-field--toggle span {
+  margin: 0;
+}
+
+.modal-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
 }
 
 .modal-actions {

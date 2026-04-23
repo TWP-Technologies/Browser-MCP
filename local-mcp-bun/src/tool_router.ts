@@ -1609,6 +1609,15 @@ export class tool_router {
       };
     }
 
+    if (action === "get_cleanup_policy") {
+      return {
+        ok: true,
+        result: {
+          stale_session_timeout_minutes: this.get_stale_session_timeout_minutes(),
+        },
+      };
+    }
+
     if (action === "set_cleanup_policy") {
       const stale_session_timeout_minutes = payload.stale_session_timeout_minutes;
       if (typeof stale_session_timeout_minutes !== "number") {
