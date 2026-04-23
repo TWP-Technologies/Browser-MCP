@@ -919,6 +919,7 @@ async function run_cleanup_modal_save(): Promise<void> {
     cleanup_modal_open = false;
     await refresh_state(false, false, true);
   } catch (error) {
+    cleanup_modal_open = false;
     set_error_banner(error instanceof Error ? error.message : String(error));
   } finally {
     cleanup_modal_busy_action = null;
@@ -950,6 +951,7 @@ async function run_cleanup_now(): Promise<void> {
     cleanup_modal_open = false;
     await refresh_state(false, false, true);
   } catch (error) {
+    cleanup_modal_open = false;
     set_error_banner(error instanceof Error ? error.message : String(error));
   } finally {
     cleanup_modal_busy_action = null;
