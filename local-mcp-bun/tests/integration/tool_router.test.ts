@@ -665,6 +665,10 @@ test("ui admin can update cleanup policy and close stale sessions", async () => 
   runtime.session_registry.get_session(stale_session_id).last_seen_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   runtime.session_registry.get_session(fresh_session_id).last_seen_at = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
+  const current_policy_response = await bridge.emit_ui_admin_request_for_tests("get_cleanup_policy", {});
+  expect(current_policy_response.ok).toBe(true);
+  expect((current_policy_response.result as { stale_session_timeout_minutes: number }).stale_session_timeout_minutes).toBe(120);
+
   const policy_response = await bridge.emit_ui_admin_request_for_tests("set_cleanup_policy", {
     stale_session_timeout_minutes: 120,
   });

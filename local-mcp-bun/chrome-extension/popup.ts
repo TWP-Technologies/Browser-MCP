@@ -59,7 +59,7 @@ interface popup_state {
   connection_hint?: string;
   bridge_url: string;
   mcp_port: number;
-  stale_session_timeout_minutes: number;
+  stale_session_timeout_minutes: number | null;
   tabs: popup_tab[];
   connections_snapshot: connections_snapshot;
 }
@@ -181,13 +181,17 @@ function capture_modal_restore_focus_target(): void {
   modal_restore_focus_selector = resolve_focus_restore_selector(modal_restore_focus_target);
 }
 
-function resolve_cleanup_timeout_minutes(): number {
+function resolve_cleanup_timeout_minutes(): number | null {
+  if (!ui_state || typeof ui_state.stale_session_timeout_minutes === "undefined") {
+    return null;
+  }
+
   const timeout_minutes = ui_state?.stale_session_timeout_minutes;
   if (typeof timeout_minutes === "number" && Number.isInteger(timeout_minutes) && timeout_minutes >= 0) {
     return timeout_minutes;
   }
 
-  return 120;
+  return null;
 }
 
 function resolve_focus_restore_selector(element: HTMLElement | null): string | null {
@@ -724,8 +728,8 @@ function set_cleanup_modal_state(open: boolean): void {
     }
 
     const timeout_minutes = resolve_cleanup_timeout_minutes();
-    cleanup_modal_enabled = timeout_minutes > 0;
-    cleanup_modal_minutes_input = String(timeout_minutes > 0 ? timeout_minutes : 120);
+    cleanup_modal_enabled = typeof timeout_minutes === "number" && timeout_minutes > 0;
+    cleanup_modal_minutes_input = String(typeof timeout_minutes === "number" && timeout_minutes > 0 ? timeout_minutes : 120);
     cleanup_modal_busy_action = null;
     cleanup_modal_open = true;
     render();
@@ -1040,7 +1044,7 @@ function render_locked_rows(locks: lock_snapshot[], tab_by_id: Map<number, popup
 function render_session_rows(
   sessions: session_snapshot[],
   disable_all: boolean,
-  stale_session_timeout_minutes: number,
+  stale_session_timeout_minutes: number | null,
   now_ms: number,
 ): string {
   if (sessions.length === 0) {
@@ -1063,7 +1067,10 @@ function render_session_rows(
       .map((session) => {
         const client_name = session.client_name && session.client_name.length > 0 ? session.client_name : "-";
         const owned_tabs = session.owned_tab_ids.length > 0 ? session.owned_tab_ids.join(", ") : "-";
-        const overdue = is_session_overdue(session, stale_session_timeout_minutes, now_ms);
+        const overdue =
+          typeof stale_session_timeout_minutes === "number"
+            ? is_session_overdue(session, stale_session_timeout_minutes, now_ms)
+            : false;
         const state_chip_class =
           session.state === "connected" ? "chip--state-online" : session.state === "disconnecting" ? "chip--state-pending" : "chip--state-offline";
 
@@ -1102,6 +1109,7 @@ function render(): void {
   const bridge_url = ui_state?.bridge_url ?? "ws://127.0.0.1:37777/extension";
   const mcp_port = ui_state?.mcp_port ?? 37_777;
   const stale_session_timeout_minutes = resolve_cleanup_timeout_minutes();
+  const cleanup_policy_loaded = typeof stale_session_timeout_minutes === "number";
 
   const tabs = Array.isArray(ui_state?.tabs) ? ui_state.tabs : [];
   const sessions = Array.isArray(ui_state?.connections_snapshot?.sessions) ? ui_state.connections_snapshot.sessions : [];
@@ -1124,7 +1132,7 @@ function render(): void {
     .sort((left, right) => left.agent_session_id.localeCompare(right.agent_session_id));
   const active_session_count = sorted_sessions.length;
   const now_ms = Date.now();
-  const overdue_session_count = count_overdue_sessions(sorted_sessions, stale_session_timeout_minutes, now_ms);
+  const overdue_session_count = cleanup_policy_loaded ? count_overdue_sessions(sorted_sessions, stale_session_timeout_minutes, now_ms) : 0;
 
   const disable_non_toggle_actions =
     loading || action_in_flight || toggle_in_flight || disable_modal_busy || cleanup_modal_busy_action !== null;
@@ -1142,10 +1150,12 @@ function render(): void {
   const bridge_url_copy_button_label = resolve_bridge_url_copy_button_label();
   const bridge_url_copy_status_label = resolve_bridge_url_copy_status_label();
   const bridge_open = bridge_connection_state === "open";
-  const cleanup_chip_label = format_cleanup_chip_label(stale_session_timeout_minutes);
+  const cleanup_chip_label = cleanup_policy_loaded ? format_cleanup_chip_label(stale_session_timeout_minutes) : "Auto-cleanup Unknown";
   const cleanup_chip_suffix = overdue_session_count > 0 ? ` · ${overdue_session_count} overdue` : "";
   const cleanup_chip_class =
-    overdue_session_count > 0
+    !cleanup_policy_loaded
+      ? "chip--muted"
+      : overdue_session_count > 0
       ? "chip--state-pending"
       : stale_session_timeout_minutes > 0
         ? "chip--muted"
@@ -1197,7 +1207,7 @@ function render(): void {
             class="chip chip--button ${cleanup_chip_class}"
             data-action="open-cleanup-modal"
             data-testid="cleanup-chip"
-            ${disable_non_toggle_actions ? "disabled" : ""}
+            ${disable_non_toggle_actions || !cleanup_policy_loaded ? "disabled" : ""}
           >
             ${escape_html(`${cleanup_chip_label}${cleanup_chip_suffix}`)}
           </button>

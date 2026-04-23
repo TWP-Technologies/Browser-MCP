@@ -130,7 +130,13 @@ export interface extension_detach_notice {
 export interface ui_admin_request {
   type: "ui_admin_request";
   request_id: string;
-  action: "close_session" | "close_all_sessions" | "detach_tab_lock" | "set_cleanup_policy" | "run_stale_session_cleanup";
+  action:
+    | "close_session"
+    | "close_all_sessions"
+    | "detach_tab_lock"
+    | "get_cleanup_policy"
+    | "set_cleanup_policy"
+    | "run_stale_session_cleanup";
   payload: Record<string, unknown>;
 }
 

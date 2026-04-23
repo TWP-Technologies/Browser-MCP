@@ -6,7 +6,6 @@ import { socket_attempt_lifecycle } from "./socket_attempt_lifecycle.js";
 const extension_id = chrome.runtime.id;
 const default_bridge_url = "ws://127.0.0.1:37777/extension";
 const default_mcp_port = 37777;
-const default_stale_session_timeout_minutes = 120;
 const max_stale_session_timeout_minutes = 10080;
 const min_port = 1;
 const max_port = 65535;
@@ -32,10 +31,11 @@ const stealth_mode_by_tab = new Map();
 let bridge_socket = null;
 let bridge_url = default_bridge_url;
 let mcp_port = default_mcp_port;
-let stale_session_timeout_minutes = default_stale_session_timeout_minutes;
+let stale_session_timeout_minutes = null;
 let cleanup_policy_has_local_override = false;
+let cleanup_policy_refresh_pending = true;
 let cleanup_policy_sync_pending = false;
-let cleanup_policy_sync_in_flight = false;
+let cleanup_policy_request_in_flight = false;
 let cleanup_policy_sync_generation = 0;
 let extension_enabled = true;
 let heartbeat_timer = null;
@@ -393,6 +393,10 @@ async function init() {
       sync_cleanup_policy_to_service().catch((error) => {
         log_warn("cleanup policy sync failed", error);
       });
+    } else if (!cleanup_policy_has_local_override && cleanup_policy_refresh_pending) {
+      refresh_cleanup_policy_from_service().catch((error) => {
+        log_warn("cleanup policy refresh failed", error);
+      });
     }
 
     send_tabs_update().catch((error) => {
@@ -542,8 +546,9 @@ async function hydrate_bridge_config() {
   bridge_url = build_bridge_url(mcp_port);
 
   const stored_timeout_minutes = parse_cleanup_timeout_minutes(result.stale_session_timeout_minutes);
-  stale_session_timeout_minutes = stored_timeout_minutes ?? default_stale_session_timeout_minutes;
+  stale_session_timeout_minutes = stored_timeout_minutes;
   cleanup_policy_has_local_override = stored_timeout_minutes !== null;
+  cleanup_policy_refresh_pending = !cleanup_policy_has_local_override;
   cleanup_policy_sync_pending = cleanup_policy_has_local_override;
 }
 
@@ -784,9 +789,15 @@ function connect_bridge(reason = "manual") {
       log_warn("tabs update on open failed", error);
     });
 
-    sync_cleanup_policy_to_service(cleanup_policy_has_local_override).catch((error) => {
-      log_warn("cleanup policy sync on open failed", error);
-    });
+    if (cleanup_policy_has_local_override) {
+      sync_cleanup_policy_to_service(true).catch((error) => {
+        log_warn("cleanup policy sync on open failed", error);
+      });
+    } else {
+      refresh_cleanup_policy_from_service(true).catch((error) => {
+        log_warn("cleanup policy refresh on open failed", error);
+      });
+    }
 
     start_heartbeat();
     notify_ui_state_change();
@@ -932,11 +943,56 @@ async function send_ui_admin_request(action, payload) {
   });
 }
 
+async function refresh_cleanup_policy_from_service(force = false) {
+  if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
+    return false;
+  }
+  if (cleanup_policy_has_local_override || cleanup_policy_request_in_flight) {
+    return false;
+  }
+  if (!cleanup_policy_refresh_pending && !force) {
+    return false;
+  }
+
+  if (force) {
+    cleanup_policy_refresh_pending = true;
+  }
+
+  cleanup_policy_request_in_flight = true;
+  const sync_generation = cleanup_policy_sync_generation;
+
+  try {
+    const result = await send_ui_admin_request("get_cleanup_policy", {});
+    if (cleanup_policy_has_local_override || sync_generation !== cleanup_policy_sync_generation) {
+      return false;
+    }
+
+    const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
+    if (synced_timeout_minutes === null) {
+      const invalid_timeout_echo = result?.stale_session_timeout_minutes;
+      log_warn("cleanup policy refresh returned an invalid timeout echo", invalid_timeout_echo);
+      notify_ui_state_change();
+      throw new Error(`Invalid stale_session_timeout_minutes echo: ${String(invalid_timeout_echo)}`);
+    }
+
+    if (cleanup_policy_has_local_override || sync_generation !== cleanup_policy_sync_generation) {
+      return false;
+    }
+
+    stale_session_timeout_minutes = synced_timeout_minutes;
+    cleanup_policy_refresh_pending = false;
+    notify_ui_state_change();
+    return true;
+  } finally {
+    cleanup_policy_request_in_flight = false;
+  }
+}
+
 async function sync_cleanup_policy_to_service(force = false) {
   if (!bridge_socket || bridge_socket.readyState !== WebSocket.OPEN || bridge_connection_state !== "open") {
     return false;
   }
-  if ((!cleanup_policy_sync_pending && !force) || cleanup_policy_sync_in_flight) {
+  if ((!cleanup_policy_sync_pending && !force) || cleanup_policy_request_in_flight) {
     return false;
   }
 
@@ -944,9 +1000,13 @@ async function sync_cleanup_policy_to_service(force = false) {
     cleanup_policy_sync_pending = true;
   }
 
-  cleanup_policy_sync_in_flight = true;
+  const requested_timeout_minutes = parse_cleanup_timeout_minutes(stale_session_timeout_minutes);
+  if (requested_timeout_minutes === null) {
+    throw new Error("Cannot sync cleanup policy before a valid timeout is available");
+  }
+
+  cleanup_policy_request_in_flight = true;
   const sync_generation = cleanup_policy_sync_generation;
-  const requested_timeout_minutes = stale_session_timeout_minutes;
 
   try {
     const result = await send_ui_admin_request("set_cleanup_policy", {
@@ -988,7 +1048,7 @@ async function sync_cleanup_policy_to_service(force = false) {
       bridge_socket.readyState === WebSocket.OPEN &&
       bridge_connection_state === "open";
 
-    cleanup_policy_sync_in_flight = false;
+    cleanup_policy_request_in_flight = false;
     if (should_retry) {
       queueMicrotask(() => {
         sync_cleanup_policy_to_service().catch((error) => {
@@ -1083,6 +1143,7 @@ async function set_stale_session_timeout_policy(next_timeout_minutes) {
 
   stale_session_timeout_minutes = validated_timeout_minutes;
   cleanup_policy_has_local_override = true;
+  cleanup_policy_refresh_pending = false;
   cleanup_policy_sync_generation += 1;
   cleanup_policy_sync_pending = true;
   await chrome.storage.local.set({
