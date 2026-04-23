@@ -340,12 +340,15 @@ function parse_port_from_bridge_url(candidate_url) {
 }
 
 function parse_cleanup_timeout_minutes(input) {
-  const parsed_value =
-    typeof input === "number"
-      ? input
-      : typeof input === "string" && input.trim().length > 0
-        ? Number.parseInt(input, 10)
-        : Number.NaN;
+  let parsed_value = Number.NaN;
+  if (typeof input === "number") {
+    parsed_value = input;
+  } else if (typeof input === "string") {
+    const trimmed_input = input.trim();
+    if (/^\d+$/.test(trimmed_input)) {
+      parsed_value = Number.parseInt(trimmed_input, 10);
+    }
+  }
 
   if (!Number.isInteger(parsed_value) || parsed_value < 0 || parsed_value > max_stale_session_timeout_minutes) {
     return null;
@@ -934,13 +937,16 @@ async function sync_cleanup_policy_to_service() {
     stale_session_timeout_minutes,
   });
   const synced_timeout_minutes = parse_cleanup_timeout_minutes(result?.stale_session_timeout_minutes);
-  if (synced_timeout_minutes !== null) {
-    stale_session_timeout_minutes = synced_timeout_minutes;
-    await chrome.storage.local.set({
-      stale_session_timeout_minutes: synced_timeout_minutes,
-    });
+  if (synced_timeout_minutes === null) {
+    console.warn("cleanup policy sync returned an invalid timeout echo", result?.stale_session_timeout_minutes);
+    notify_ui_state_change();
+    return false;
   }
 
+  stale_session_timeout_minutes = synced_timeout_minutes;
+  await chrome.storage.local.set({
+    stale_session_timeout_minutes: synced_timeout_minutes,
+  });
   cleanup_policy_sync_pending = false;
   notify_ui_state_change();
   return true;
@@ -1204,13 +1210,7 @@ function register_ui_message_listener() {
       }
 
       if (message.type === "ui_set_cleanup_policy") {
-        const parsed_timeout_minutes =
-          typeof message.stale_session_timeout_minutes === "number"
-            ? message.stale_session_timeout_minutes
-            : typeof message.stale_session_timeout_minutes === "string"
-              ? Number.parseInt(message.stale_session_timeout_minutes, 10)
-              : Number.NaN;
-        return await set_stale_session_timeout_policy(parsed_timeout_minutes);
+        return await set_stale_session_timeout_policy(message.stale_session_timeout_minutes);
       }
 
       if (message.type === "ui_navigate_to_tab") {

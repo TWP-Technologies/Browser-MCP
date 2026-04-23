@@ -815,7 +815,7 @@ tbody tr:last-child td {
   margin: 0;
 }
 
-input[type="checkbox"] {
+.modal-field input[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);

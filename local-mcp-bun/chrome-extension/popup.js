@@ -370,7 +370,7 @@ async function send_ui_message(type, payload = {}) {
   }
   return response.result;
 }
-async function refresh_state(clear_error = true, show_loading = true) {
+async function refresh_state(clear_error = true, show_loading = true, preserve_info_on_error = false) {
   if (refresh_in_flight) {
     refresh_queued = true;
     return;
@@ -387,7 +387,9 @@ async function refresh_state(clear_error = true, show_loading = true) {
     ui_state = await send_ui_message("ui_get_state");
     maybe_trigger_poll_pulse(ui_state);
   } catch (error) {
-    set_error_banner(error instanceof Error ? error.message : String(error));
+    if (!preserve_info_on_error || !info_message) {
+      set_error_banner(error instanceof Error ? error.message : String(error));
+    }
   } finally {
     if (show_loading) {
       loading = false;
@@ -589,7 +591,7 @@ async function run_cleanup_modal_save() {
     });
     set_info_banner(timeout_minutes > 0 ? `Auto-cleanup set to ${timeout_minutes} minute${timeout_minutes === 1 ? "" : "s"}.` : "Auto-cleanup disabled.");
     cleanup_modal_open = false;
-    await refresh_state(false, false);
+    await refresh_state(false, false, true);
   } catch (error) {
     set_error_banner(error instanceof Error ? error.message : String(error));
   } finally {
@@ -613,7 +615,7 @@ async function run_cleanup_now() {
       set_info_banner(cleanup_summary.info_message);
     }
     cleanup_modal_open = false;
-    await refresh_state(false, false);
+    await refresh_state(false, false, true);
   } catch (error) {
     set_error_banner(error instanceof Error ? error.message : String(error));
   } finally {
