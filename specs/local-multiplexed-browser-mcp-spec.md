@@ -219,12 +219,11 @@
 
 ### 8.5 Internal Components
 
-- `session_registry`: manages ASID lifecycle, heartbeat/last_seen, disconnect hooks.
 - `session_registry`: manages ASID lifecycle, heartbeat/last_seen, disconnect hooks, and stale-session selection.
 - `bridge_manager`: owns WebSocket lifecycle (`open`, `message`, `close`, `error`, `drain`) and extension heartbeat.
 - `tab_lock_manager`: atomic lock/unlock APIs, wait queue, lease expiry, recovery reconciliation.
 - `debugger_adapter`: thin wrapper over `chrome.debugger.attach/detach/sendCommand/getTargets`.
-- `tool_router`: validates tool input, applies auth, dispatches to domain services, owns cleanup policy, and performs hard session reaping.
+- `tool_router`: validates tool input, applies auth, dispatches to domain services, returns structured output/errors, owns cleanup policy, and performs hard session reaping.
 - `observability_adapter`: structured logs, metrics, correlation IDs.
 
 ### 8.6 State Machines
