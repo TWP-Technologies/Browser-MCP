@@ -67,7 +67,7 @@
 ## 3.0 Data Models (Required)
 
 - `agent_session`: `agent_session_id` (REQUIRED, string, unique, human-readable prefix + nonce), `client_name` (OPTIONAL, string, max 64 chars), `connected_at` (REQUIRED, RFC3339 timestamp), `last_seen_at` (REQUIRED, RFC3339 timestamp), `state` (REQUIRED, enum: `connected|disconnecting|disconnected`), `auth_mode` (REQUIRED, enum: `none|token`), `owned_tab_ids` (REQUIRED, array<number>, default `[]`).
-- `cleanup_policy`: `stale_session_timeout_minutes` (REQUIRED, integer, `0` disables automatic cleanup, default `120`), `policy_source` (REQUIRED, enum: `env|extension_ui`), `updated_at` (REQUIRED, RFC3339 timestamp).
+- `cleanup_policy`: `stale_session_timeout_minutes` (REQUIRED, integer, `0` disables automatic cleanup, default `120`).
 - `extension_bridge`: `bridge_id` (REQUIRED, string), `connection_state` (REQUIRED, enum: `up|down|reconnecting`), `connected_at` (OPTIONAL, RFC3339 timestamp), `last_disconnect_reason` (OPTIONAL, enum: `socket_closed|heartbeat_timeout|manual|unknown`), `protocol_version` (REQUIRED, semver string).
 - `tab_snapshot`: `tab_id` (REQUIRED, integer > 0), `url` (REQUIRED, URL string), `title` (REQUIRED, string), `debugger_attached` (REQUIRED, boolean), `is_locked_by_agent` (REQUIRED, boolean), `locked_by_agent_session_id` (OPTIONAL, string when locked), `lock_acquired_at` (OPTIONAL, RFC3339 timestamp).
 - `tab_lock`: `tab_id` (REQUIRED, integer > 0, unique), `owner_agent_session_id` (REQUIRED, string), `lock_state` (REQUIRED, enum: `pending_attach|attached|releasing`), `lease_expires_at` (OPTIONAL, RFC3339 timestamp), `wait_queue` (REQUIRED, array<lock_wait_request>, default `[]`).
@@ -136,7 +136,7 @@
 
 ### 5.4 Implementation Status Snapshot (Living Spec)
 
-- **Completed in current implementation baseline:** `FR-001`, `FR-002`, `FR-003`, `FR-004`, `FR-005`, `FR-006`, `FR-007`, `FR-008`, `FR-009`, `FR-010`, `FR-011`, `FR-012`, `FR-013`, `FR-014`, `FR-015`, `FR-018`.
+- **Completed in current implementation baseline:** `FR-001`, `FR-002`, `FR-003`, `FR-004`, `FR-005`, `FR-006`, `FR-007`, `FR-008`, `FR-009`, `FR-010`, `FR-011`, `FR-012`, `FR-013`, `FR-014`, `FR-015`, `FR-016`, `FR-017`, `FR-018`.
 - **Partially implemented:** none.
 - **Pending:** none for current v1 scope.
 - Detailed incremental updates MUST be appended to `specs/local-multiplexed-browser-mcp-changelog.md`.
