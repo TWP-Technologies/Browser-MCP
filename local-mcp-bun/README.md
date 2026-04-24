@@ -84,8 +84,9 @@ You only need to set bridge env vars when overriding defaults (for example custo
 ### Stale Session Cleanup
 
 - The runtime treats staleness as lack of valid MCP traffic for the configured number of minutes.
-- Automatic cleanup hard-reaps stale sessions by cancelling queued waiters, releasing owned locks, and detaching owned tabs when possible.
-- In shared-daemon mode, stale session cleanup also closes the owning ingress socket so abandoned proxy processes can exit; idle unbound ingress sockets may also be closed on the same timeout.
+- Automatic cleanup soft-reaps stale browser resources by cancelling queued waiters, releasing owned locks, and detaching owned tabs when possible.
+- Live MCP transports stay open after stale cleanup so long-running Codex or agent threads can recover on their next tool call; idle unbound ingress sockets may still be closed on the same timeout.
+- A resource-reaped session that never revives may be removed from the registry after another full timeout window; initialized live transports can still rebind on their next request.
 - The extension popup exposes a compact `Auto-cleanup` control with `Off` or `<minutes>m`, plus `Run Cleanup Now`.
 
 ### MCP Auth Token: Is It Required?

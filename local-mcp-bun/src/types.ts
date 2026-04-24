@@ -47,6 +47,7 @@ export interface agent_session {
   client_name?: string;
   connected_at: string;
   last_seen_at: string;
+  resource_reaped_at?: string;
   state: session_state;
   auth_mode: "none" | "token";
   owned_tab_ids: Set<number>;
@@ -64,6 +65,7 @@ export interface session_snapshot {
   client_name?: string;
   connected_at: string;
   last_seen_at: string;
+  resource_reaped_at?: string;
   state: session_state;
   owned_tab_ids: number[];
 }

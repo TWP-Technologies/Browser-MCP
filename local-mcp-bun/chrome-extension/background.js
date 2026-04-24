@@ -868,6 +868,7 @@ function normalize_connections_snapshot(snapshot) {
           client_name: typeof session.client_name === "string" ? session.client_name : undefined,
           connected_at: typeof session.connected_at === "string" ? session.connected_at : "",
           last_seen_at: typeof session.last_seen_at === "string" ? session.last_seen_at : "",
+          resource_reaped_at: typeof session.resource_reaped_at === "string" ? session.resource_reaped_at : undefined,
           state: typeof session.state === "string" ? session.state : "connected",
           owned_tab_ids: Array.isArray(session.owned_tab_ids)
             ? session.owned_tab_ids.filter((tab_id) => typeof tab_id === "number")

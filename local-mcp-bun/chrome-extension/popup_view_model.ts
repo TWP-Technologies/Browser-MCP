@@ -8,6 +8,7 @@ export interface toggle_intent_state {
 
 export interface cleanup_session_state {
   last_seen_at: string;
+  resource_reaped_at?: string;
 }
 
 function pad_2(value: number): string {
@@ -74,12 +75,24 @@ export function format_cleanup_chip_label(stale_session_timeout_minutes: number)
   return `Auto-cleanup ${stale_session_timeout_minutes}m`;
 }
 
+export function has_valid_resource_reaped_at(session: cleanup_session_state): boolean {
+  if (typeof session.resource_reaped_at !== "string" || session.resource_reaped_at.length === 0) {
+    return false;
+  }
+
+  return Number.isFinite(Date.parse(session.resource_reaped_at));
+}
+
 export function is_session_overdue(
   session: cleanup_session_state,
   stale_session_timeout_minutes: number,
   now_ms = Date.now(),
 ): boolean {
   if (!Number.isFinite(stale_session_timeout_minutes) || stale_session_timeout_minutes <= 0) {
+    return false;
+  }
+
+  if (has_valid_resource_reaped_at(session)) {
     return false;
   }
 
