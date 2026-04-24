@@ -335,34 +335,24 @@ export class daemon_ingress_server {
       return;
     }
 
-    const stale_closed_session_ids = new Set(cleanup_result.closed_session_ids);
-    if (stale_closed_session_ids.size > 0) {
-      this.close_connections_for_sessions([...stale_closed_session_ids], "stale_session_timeout");
-    }
-
-    this.close_connections_for_missing_sessions("session_closed", stale_closed_session_ids);
-    this.close_stale_unbound_connections(cleanup_result.stale_session_timeout_minutes);
+    const freshly_unbound_connection_ids = this.unbind_connections_for_missing_sessions();
+    this.close_stale_unbound_connections(cleanup_result.stale_session_timeout_minutes, freshly_unbound_connection_ids);
   }
 
-  private close_connections_for_sessions(agent_session_ids: string[], reason: string): void {
-    for (const agent_session_id of agent_session_ids) {
-      const connection_id = this.connection_id_by_agent_session_id.get(agent_session_id);
-      if (typeof connection_id !== "number") {
-        continue;
-      }
-
-      const socket = this.sockets_by_connection_id.get(connection_id);
-      socket?.close(1000, reason);
-    }
-  }
-
-  private close_stale_unbound_connections(stale_session_timeout_minutes: number): void {
+  private close_stale_unbound_connections(
+    stale_session_timeout_minutes: number,
+    skipped_connection_ids = new Set<number>(),
+  ): void {
     if (stale_session_timeout_minutes <= 0) {
       return;
     }
 
     const stale_before_ms = Date.now() - stale_session_timeout_minutes * 60_000;
     for (const [connection_id, last_activity_at_ms] of this.last_activity_at_ms_by_connection_id.entries()) {
+      if (skipped_connection_ids.has(connection_id)) {
+        continue;
+      }
+
       if (this.agent_session_id_by_connection_id.has(connection_id)) {
         continue;
       }
@@ -376,19 +366,21 @@ export class daemon_ingress_server {
     }
   }
 
-  private close_connections_for_missing_sessions(reason: string, ignored_session_ids: ReadonlySet<string> = new Set()): void {
-    for (const [connection_id, agent_session_id] of this.agent_session_id_by_connection_id.entries()) {
-      if (ignored_session_ids.has(agent_session_id)) {
-        continue;
-      }
+  private unbind_connections_for_missing_sessions(): Set<number> {
+    const unbound_connection_ids = new Set<number>();
+    const unbound_at_ms = Date.now();
 
+    for (const [connection_id, agent_session_id] of this.agent_session_id_by_connection_id.entries()) {
       if (this.runtime.session_registry.has_session(agent_session_id)) {
         continue;
       }
 
-      const socket = this.sockets_by_connection_id.get(connection_id);
-      socket?.close(1000, reason);
+      this.unbind_agent_session_from_connection(connection_id, agent_session_id);
+      this.last_activity_at_ms_by_connection_id.set(connection_id, unbound_at_ms);
+      unbound_connection_ids.add(connection_id);
     }
+
+    return unbound_connection_ids;
   }
 
   private clear_cleanup_timer(): void {

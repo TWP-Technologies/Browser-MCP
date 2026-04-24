@@ -4,6 +4,7 @@ import {
   compute_next_toggle_target_enabled,
   format_cleanup_chip_label,
   format_snapshot_badge_timestamp,
+  has_valid_resource_reaped_at,
   is_session_overdue,
   resolve_toggle_reference_enabled,
 } from "../../chrome-extension/popup_view_model";
@@ -107,6 +108,41 @@ describe("popup_view_model cleanup helpers", () => {
         120,
         now,
       ),
+    ).toBe(false);
+    expect(
+      is_session_overdue(
+        {
+          last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString(),
+          resource_reaped_at: new Date(2026, 3, 22, 15, 59, 0).toISOString(),
+        },
+        120,
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      is_session_overdue(
+        {
+          last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString(),
+          resource_reaped_at: "not-a-timestamp",
+        },
+        120,
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("validates resource-reaped timestamps consistently", () => {
+    expect(
+      has_valid_resource_reaped_at({
+        last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString(),
+        resource_reaped_at: new Date(2026, 3, 22, 15, 59, 0).toISOString(),
+      }),
+    ).toBe(true);
+    expect(
+      has_valid_resource_reaped_at({
+        last_seen_at: new Date(2026, 3, 22, 13, 30, 0).toISOString(),
+        resource_reaped_at: "not-a-timestamp",
+      }),
     ).toBe(false);
   });
 

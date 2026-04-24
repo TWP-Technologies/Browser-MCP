@@ -35,7 +35,9 @@ interface close_session_result {
 
 interface stale_session_cleanup_result {
   stale_session_timeout_minutes: number;
+  attempted_session_ids: string[];
   stale_session_ids: string[];
+  reaped_session_ids: string[];
   closed_session_ids: string[];
   failed: Array<{
     agent_session_id: string;
@@ -325,6 +327,13 @@ export class tool_router {
 
   public open_session(client_name?: string, supplied_token?: string): { agent_session_id: string } {
     const auth_mode = this.assert_token_if_required(supplied_token);
+    return this.open_authenticated_session(client_name, auth_mode);
+  }
+
+  private open_authenticated_session(
+    client_name?: string,
+    auth_mode: "none" | "token" = "none",
+  ): { agent_session_id: string } {
     const session = this.session_registry.create_session(client_name, auth_mode);
     void this.publish_connections_snapshot("open_session");
     return { agent_session_id: session.agent_session_id };
@@ -353,19 +362,50 @@ export class tool_router {
     if (resolved_timeout_minutes <= 0) {
       return {
         stale_session_timeout_minutes: resolved_timeout_minutes,
+        attempted_session_ids: [],
         stale_session_ids: [],
+        reaped_session_ids: [],
         closed_session_ids: [],
         failed: [],
       };
     }
 
     const stale_session_ids = this.session_registry.list_stale_session_ids(resolved_timeout_minutes, now_ms);
+    const expired_reaped_session_ids = this.session_registry.list_expired_reaped_session_ids(
+      resolved_timeout_minutes,
+      now_ms,
+    );
+    const attempted_session_ids = [...new Set([...stale_session_ids, ...expired_reaped_session_ids])].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    const reaped_session_ids: string[] = [];
     const closed_session_ids: string[] = [];
     const failed: stale_session_cleanup_result["failed"] = [];
 
     for (const agent_session_id of stale_session_ids) {
       try {
-        await this.close_session_with_reason(agent_session_id, "stale_session_cleanup");
+        if (!this.session_registry.is_session_stale(agent_session_id, resolved_timeout_minutes, now_ms)) {
+          continue;
+        }
+
+        await this.reap_session_resources_with_reason(agent_session_id, "stale_session_cleanup");
+        reaped_session_ids.push(agent_session_id);
+      } catch (error) {
+        const mapped_error = to_tool_error(error);
+        failed.push({
+          agent_session_id,
+          error: mapped_error.message,
+        });
+      }
+    }
+
+    for (const agent_session_id of expired_reaped_session_ids) {
+      try {
+        if (!this.session_registry.is_reaped_session_expired(agent_session_id, resolved_timeout_minutes, now_ms)) {
+          continue;
+        }
+
+        await this.close_session_with_reason(agent_session_id, "expired_reaped_session_cleanup");
         closed_session_ids.push(agent_session_id);
       } catch (error) {
         const mapped_error = to_tool_error(error);
@@ -378,7 +418,9 @@ export class tool_router {
 
     return {
       stale_session_timeout_minutes: resolved_timeout_minutes,
+      attempted_session_ids,
       stale_session_ids,
+      reaped_session_ids,
       closed_session_ids,
       failed,
     };
@@ -919,36 +961,30 @@ export class tool_router {
     this.session_registry.touch_session(agent_session_id);
     await this.reconcile_locks_with_bridge("call_tool");
 
+    let result: Record<string, unknown>;
     if (tool_name === "learn_browser_mcp") {
-      return this.get_learn_browser_mcp_result();
-    }
-
-    if (tool_name === "list_available_tabs") {
+      result = this.get_learn_browser_mcp_result();
+    } else if (tool_name === "list_available_tabs") {
       const tabs = await this.list_available_tabs(agent_session_id);
-      return { tabs };
-    }
-
-    if (tool_name === "attach_to_tab") {
+      result = { tabs };
+    } else if (tool_name === "attach_to_tab") {
       const parsed_args = this.parse_attach_args(args);
-      return await this.attach_to_tab(agent_session_id, parsed_args);
-    }
-
-    if (tool_name === "detach_from_tab") {
+      result = await this.attach_to_tab(agent_session_id, parsed_args);
+    } else if (tool_name === "detach_from_tab") {
       const parsed_args = this.parse_detach_args(agent_session_id, args);
-      return await this.detach_from_tab(agent_session_id, parsed_args);
+      result = await this.detach_from_tab(agent_session_id, parsed_args);
+    } else if (tool_name === "browser_tabs") {
+      result = await this.handle_browser_tabs(agent_session_id, args);
+    } else if (passthrough_tools.includes(tool_name as (typeof passthrough_tools)[number])) {
+      result = await this.call_tab_scoped_tool(agent_session_id, tool_name, args);
+    } else {
+      throw new tool_error("INVALID_ARGUMENT", `unknown tool: ${tool_name}`, false, {
+        tool_name,
+      });
     }
 
-    if (tool_name === "browser_tabs") {
-      return await this.handle_browser_tabs(agent_session_id, args);
-    }
-
-    if (passthrough_tools.includes(tool_name as (typeof passthrough_tools)[number])) {
-      return await this.call_tab_scoped_tool(agent_session_id, tool_name, args);
-    }
-
-    throw new tool_error("INVALID_ARGUMENT", `unknown tool: ${tool_name}`, false, {
-      tool_name,
-    });
+    this.session_registry.mark_session_recovered(agent_session_id);
+    return result;
   }
 
   public async release_locks_for_session(agent_session_id: string): Promise<number[]> {
@@ -1726,6 +1762,43 @@ export class tool_router {
         await this.bridge_transport.detach_from_tab(tab_id, agent_session_id);
       } catch {
         // Lock release is still required even if detach call fails.
+      }
+
+      try {
+        this.tab_lock_manager.release_lock(tab_id, agent_session_id);
+      } catch {
+        // Lock may already be released or transferred by a detach notice.
+      }
+    }
+
+    const newly_cancelled_waiting_tab_ids = this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
+    await this.publish_connections_snapshot(reason);
+    return {
+      released_tab_ids,
+      cancelled_waiting_tab_ids: dedupe_sorted_tab_ids([
+        ...cancelled_waiting_tab_ids,
+        ...newly_cancelled_waiting_tab_ids,
+      ]),
+    };
+  }
+
+  private async reap_session_resources_with_reason(
+    agent_session_id: string,
+    reason: string,
+  ): Promise<close_session_result> {
+    const held_lock_tab_ids = this.tab_lock_manager.list_owned_tab_ids(agent_session_id);
+    const released_owned_tab_ids = this.session_registry.mark_resources_reaped(agent_session_id);
+    const cancelled_waiting_tab_ids = this.tab_lock_manager.cancel_waiters_by_owner(agent_session_id);
+    const active_tab_id = this.active_tab_by_session.get(agent_session_id);
+
+    this.active_tab_by_session.delete(agent_session_id);
+
+    const released_tab_ids = dedupe_sorted_tab_ids([...held_lock_tab_ids, ...released_owned_tab_ids, active_tab_id]);
+    for (const tab_id of released_tab_ids) {
+      try {
+        await this.bridge_transport.detach_from_tab(tab_id, agent_session_id);
+      } catch {
+        // Browser resources are best-effort during stale cleanup; local locks must still be released.
       }
 
       try {

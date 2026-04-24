@@ -651,7 +651,7 @@ test("ui admin detach_tab_lock releases the owner lock", async () => {
   await runtime.stop();
 });
 
-test("ui admin can update cleanup policy and close stale sessions", async () => {
+test("ui admin can update cleanup policy and release stale session resources", async () => {
   const runtime = new local_mcp_runtime({
     bridge_mode: "in_memory",
     bridge_host: "127.0.0.1",
@@ -662,6 +662,7 @@ test("ui admin can update cleanup policy and close stale sessions", async () => 
   const stale_session_id = runtime.tool_router.open_session("admin-stale").agent_session_id;
   const fresh_session_id = runtime.tool_router.open_session("admin-fresh").agent_session_id;
 
+  await runtime.tool_router.call_tool(stale_session_id, "attach_to_tab", { tab_id: 101 });
   runtime.session_registry.get_session(stale_session_id).last_seen_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   runtime.session_registry.get_session(fresh_session_id).last_seen_at = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
@@ -679,18 +680,162 @@ test("ui admin can update cleanup policy and close stale sessions", async () => 
   expect(cleanup_response.ok).toBe(true);
   const cleanup_result = cleanup_response.result as {
     stale_session_timeout_minutes: number;
+    attempted_session_ids: string[];
     stale_session_ids: string[];
+    reaped_session_ids: string[];
     closed_session_ids: string[];
     failed: Array<{ agent_session_id: string; error: string }>;
   };
   expect(cleanup_result.stale_session_timeout_minutes).toBe(120);
+  expect(cleanup_result.attempted_session_ids).toContain(stale_session_id);
   expect(cleanup_result.stale_session_ids).toContain(stale_session_id);
-  expect(cleanup_result.closed_session_ids).toContain(stale_session_id);
-  expect(cleanup_result.closed_session_ids).not.toContain(fresh_session_id);
+  expect(cleanup_result.reaped_session_ids).toContain(stale_session_id);
+  expect(cleanup_result.reaped_session_ids).not.toContain(fresh_session_id);
+  expect(cleanup_result.closed_session_ids).toEqual([]);
   expect(cleanup_result.failed).toEqual([]);
-  expect(runtime.session_registry.list_active_sessions()).toEqual([fresh_session_id]);
+  expect(runtime.session_registry.list_active_sessions().sort()).toEqual([fresh_session_id, stale_session_id].sort());
+  expect(runtime.tab_lock_manager.get_lock(101)).toBeUndefined();
+  expect(runtime.session_registry.get_session(stale_session_id).owned_tab_ids.size).toBe(0);
+  expect(typeof runtime.session_registry.get_session(stale_session_id).resource_reaped_at).toBe("string");
 
   await runtime.stop();
+});
+
+test("close_stale_sessions closes resource-reaped sessions after the grace window", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("expired-reaped").agent_session_id;
+
+  runtime.session_registry.get_session(session_id).last_seen_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const first_cleanup_result = await runtime.tool_router.close_stale_sessions(120);
+  expect(first_cleanup_result.attempted_session_ids).toEqual([session_id]);
+  expect(first_cleanup_result.stale_session_ids).toEqual([session_id]);
+  expect(first_cleanup_result.reaped_session_ids).toEqual([session_id]);
+  expect(first_cleanup_result.closed_session_ids).toEqual([]);
+  expect(runtime.session_registry.list_active_sessions()).toEqual([session_id]);
+
+  runtime.session_registry.get_session(session_id).resource_reaped_at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const second_cleanup_result = await runtime.tool_router.close_stale_sessions(120);
+  expect(second_cleanup_result.attempted_session_ids).toEqual([session_id]);
+  expect(second_cleanup_result.stale_session_ids).toEqual([]);
+  expect(second_cleanup_result.reaped_session_ids).toEqual([]);
+  expect(second_cleanup_result.closed_session_ids).toEqual([session_id]);
+  expect(runtime.session_registry.list_active_sessions()).toEqual([]);
+
+  await runtime.stop();
+});
+
+test("close_stale_sessions skips a stale session that revives before resource reap", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("revived-stale").agent_session_id;
+  const original_list_stale_session_ids = runtime.session_registry.list_stale_session_ids.bind(runtime.session_registry);
+  let list_call_count = 0;
+
+  try {
+    runtime.session_registry.get_session(session_id).last_seen_at = new Date("2026-04-22T10:00:00.000Z").toISOString();
+    runtime.session_registry.list_stale_session_ids = (timeout_minutes: number, now_ms = Date.now()) => {
+      const session_ids = original_list_stale_session_ids(timeout_minutes, now_ms);
+      list_call_count += 1;
+      if (list_call_count === 1) {
+        runtime.session_registry.touch_session(session_id);
+      }
+
+      return session_ids;
+    };
+
+    const cleanup_result = await runtime.tool_router.close_stale_sessions(
+      120,
+      new Date("2026-04-22T16:00:00.000Z").getTime(),
+    );
+
+    expect(cleanup_result.attempted_session_ids).toEqual([session_id]);
+    expect(cleanup_result.reaped_session_ids).toEqual([]);
+    expect(cleanup_result.closed_session_ids).toEqual([]);
+    expect(cleanup_result.failed).toEqual([]);
+    expect(runtime.session_registry.list_active_sessions()).toEqual([session_id]);
+    expect(runtime.session_registry.get_session(session_id).resource_reaped_at).toBeUndefined();
+  } finally {
+    runtime.session_registry.list_stale_session_ids = original_list_stale_session_ids;
+    await runtime.stop();
+  }
+});
+
+test("close_stale_sessions skips a reaped session that revives before registry close", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("revived-reaped").agent_session_id;
+  const original_list_expired_reaped_session_ids = runtime.session_registry.list_expired_reaped_session_ids.bind(
+    runtime.session_registry,
+  );
+  let list_call_count = 0;
+
+  try {
+    runtime.session_registry.get_session(session_id).resource_reaped_at = new Date(
+      "2026-04-22T10:00:00.000Z",
+    ).toISOString();
+    runtime.session_registry.list_expired_reaped_session_ids = (timeout_minutes: number, now_ms = Date.now()) => {
+      const session_ids = original_list_expired_reaped_session_ids(timeout_minutes, now_ms);
+      list_call_count += 1;
+      if (list_call_count === 1) {
+        runtime.session_registry.mark_session_recovered(session_id);
+      }
+
+      return session_ids;
+    };
+
+    const cleanup_result = await runtime.tool_router.close_stale_sessions(
+      120,
+      new Date("2026-04-22T16:00:00.000Z").getTime(),
+    );
+
+    expect(cleanup_result.attempted_session_ids).toEqual([session_id]);
+    expect(cleanup_result.reaped_session_ids).toEqual([]);
+    expect(cleanup_result.closed_session_ids).toEqual([]);
+    expect(cleanup_result.failed).toEqual([]);
+    expect(runtime.session_registry.list_active_sessions()).toEqual([session_id]);
+    expect(runtime.session_registry.get_session(session_id).resource_reaped_at).toBeUndefined();
+  } finally {
+    runtime.session_registry.list_expired_reaped_session_ids = original_list_expired_reaped_session_ids;
+    await runtime.stop();
+  }
+});
+
+test("call_tool keeps reaped marker on failed dispatch and clears it after successful dispatch", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: test_bridge_port,
+  });
+
+  const session_id = runtime.tool_router.open_session("reaped-dispatch").agent_session_id;
+
+  try {
+    runtime.session_registry.get_session(session_id).resource_reaped_at = new Date(
+      "2026-04-22T10:00:00.000Z",
+    ).toISOString();
+
+    await expect(runtime.tool_router.call_tool(session_id, "missing_tool", {})).rejects.toThrow();
+    expect(typeof runtime.session_registry.get_session(session_id).resource_reaped_at).toBe("string");
+
+    const list_result = await runtime.tool_router.call_tool(session_id, "list_available_tabs", {});
+    expect(Array.isArray(list_result.tabs)).toBe(true);
+    expect(runtime.session_registry.get_session(session_id).resource_reaped_at).toBeUndefined();
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("run_stale_session_cleanup returns no stale sessions when the timeout is disabled", async () => {
@@ -706,7 +851,9 @@ test("run_stale_session_cleanup returns no stale sessions when the timeout is di
   const cleanup_result = await runtime.tool_router.close_stale_sessions(0);
   expect(cleanup_result).toEqual({
     stale_session_timeout_minutes: 0,
+    attempted_session_ids: [],
     stale_session_ids: [],
+    reaped_session_ids: [],
     closed_session_ids: [],
     failed: [],
   });

@@ -1,5 +1,31 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-04-23
+
+### v0.5.1 Cleanup Contract (FR-016, FR-017)
+
+- FR-016 now treats `MCP_SESSION_IDLE_TIMEOUT_MINUTES=0` as disabled and otherwise soft-reaps idle session browser resources instead of closing live MCP transports.
+- FR-016 now closes unrevived resource-reaped registry entries only after one additional timeout window.
+- FR-017 now keeps shared-daemon ingress sockets open when they were freshly unbound from a missing session, while still allowing stale unbound sockets to be closed by the same timeout policy.
+- The session registry exposes the lifecycle through `mark_resources_reaped`, `mark_session_recovered`, `list_stale_session_ids`, `is_session_stale`, `list_expired_reaped_session_ids`, and `is_reaped_session_expired`; list APIs return sorted IDs for the supplied `timeout_minutes` and optional `now_ms`.
+
+### Implemented
+
+- Changed stale-session cleanup from transport-closing hard reap to browser-resource soft reap for live MCP transports.
+- Stale cleanup now releases tab locks, detaches owned tabs, cancels queued waiters, and records `resource_reaped_at` without closing a still-connected Codex/agent socket.
+- Resource-reaped sessions now get one additional timeout window to revive before the registry entry is closed; live initialized transports remain recoverable through implicit rebind.
+- Implicit rebind now reuses the original initialize token through the normal `open_session` auth path instead of bypassing token validation.
+- Live MCP protocol sessions now recover after external cleanup by rebinding implicit sessions on the next valid MCP request.
+- Daemon ingress now closes only unbound stale sockets for cleanup; bound live sockets remain open and recoverable.
+- Updated cleanup UI language to describe resource release rather than session/process shutdown.
+- Updated local release identifiers from `0.5.0` to `0.5.1`.
+
+### Verification
+
+- `bun test local-mcp-bun/tests/unit/session_registry.test.ts local-mcp-bun/tests/unit/mcp_protocol_session.test.ts local-mcp-bun/tests/integration/tool_router.test.ts local-mcp-bun/tests/integration/daemon_ingress_cleanup.test.ts` passed, covering `resource_reaped_at`, implicit rebind through `open_session`, daemon ingress socket recovery, and the additional timeout window.
+- `LOCAL_MCP_TEST_BRIDGE_PORT=48777 bun run --cwd local-mcp-bun test:hard-gate` passed, including unit, integration, browser E2E, fault, and concurrency coverage for live MCP cleanup recovery.
+- `bun run --cwd local-mcp-bun build:popup-ui`, `bun run --cwd local-mcp-bun check:popup-ui`, `bun run --cwd local-mcp-bun lint:spec`, and `bun run --cwd local-mcp-bun release:check-version -- --version v0.5.1` passed for updated UI language, spec consistency, and local release identifiers.
+
 ## 2026-04-22
 
 ### Implemented

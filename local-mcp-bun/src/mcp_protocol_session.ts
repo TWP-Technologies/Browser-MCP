@@ -7,7 +7,7 @@ const local_protocol_version = "local-mcp-bun-v2";
 
 export const server_info = {
   name: "local-mcp",
-  version: "0.5.0",
+  version: "0.5.1",
 } as const;
 
 interface mcp_protocol_session_options {
@@ -23,6 +23,9 @@ export class mcp_protocol_session {
   private readonly on_agent_session_bound?: (agent_session_id: string) => void;
   private readonly on_agent_session_released?: (agent_session_id: string) => void;
   private initialized_agent_session_id: string | null;
+  private initialized_client_name: string | undefined;
+  private initialized_token: string | undefined;
+  private initialized_auth_mode: "none" | "token" | null;
   private closed: boolean;
 
   public constructor(options: mcp_protocol_session_options) {
@@ -31,6 +34,9 @@ export class mcp_protocol_session {
     this.on_agent_session_bound = options.on_agent_session_bound;
     this.on_agent_session_released = options.on_agent_session_released;
     this.initialized_agent_session_id = null;
+    this.initialized_client_name = undefined;
+    this.initialized_token = undefined;
+    this.initialized_auth_mode = null;
     this.closed = false;
   }
 
@@ -80,18 +86,18 @@ export class mcp_protocol_session {
     } catch {
       // Best-effort cleanup for dropped client sessions.
     } finally {
-      this.clear_initialized_agent_session_id();
+      this.clear_initialized_client_state();
     }
   }
 
   private async dispatch_notification(request: json_rpc_request): Promise<void> {
     if (request.method === "notifications/initialized" || request.method === "initialized") {
-      this.touch_initialized_session_if_present();
+      this.touch_or_rebind_initialized_session_for_notification();
       return;
     }
 
     if (request.method === "notifications/cancelled") {
-      this.touch_initialized_session_if_present();
+      this.touch_or_rebind_initialized_session_for_notification();
       return;
     }
   }
@@ -103,9 +109,9 @@ export class mcp_protocol_session {
         const client_name = this.resolve_client_name(request);
         const token = typeof request.params?.token === "string" ? request.params.token : undefined;
 
-        if (this.initialized_agent_session_id) {
-          const previous_agent_session_id = this.initialized_agent_session_id;
-          this.clear_initialized_agent_session_id();
+        const previous_agent_session_id = this.initialized_agent_session_id;
+        this.clear_initialized_client_state();
+        if (previous_agent_session_id) {
           try {
             await this.runtime.tool_router.close_session(previous_agent_session_id);
           } catch {
@@ -114,6 +120,10 @@ export class mcp_protocol_session {
         }
 
         const result = this.runtime.tool_router.open_session(client_name, token);
+        const session = this.runtime.session_registry.get_session(result.agent_session_id);
+        this.initialized_client_name = client_name;
+        this.initialized_token = session.auth_mode === "token" ? token : undefined;
+        this.initialized_auth_mode = session.auth_mode;
         this.set_initialized_agent_session_id(result.agent_session_id);
         return {
           jsonrpc: "2.0",
@@ -137,7 +147,7 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "prompts/list") {
-        this.touch_initialized_session_if_present();
+        this.touch_or_rebind_initialized_session_if_present();
         return {
           jsonrpc: "2.0",
           id: request.id ?? null,
@@ -148,7 +158,7 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "prompts/get") {
-        this.touch_initialized_session_if_present();
+        this.touch_or_rebind_initialized_session_if_present();
         const prompt_name = request.params?.name;
         const prompt_arguments =
           request.params?.arguments && typeof request.params.arguments === "object"
@@ -166,7 +176,7 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "tools/list") {
-        this.touch_initialized_session_if_present();
+        this.touch_or_rebind_initialized_session_if_present();
         return {
           jsonrpc: "2.0",
           id: request.id ?? null,
@@ -179,7 +189,8 @@ export class mcp_protocol_session {
       if (request.method === "tools/call") {
         const tool_name = request.params?.name;
         const args = request.params?.arguments;
-        const agent_session_id = this.resolve_requested_agent_session_id(request.params?.agent_session_id);
+        const legacy_agent_session_id = request.params?.agent_session_id;
+        const agent_session_id = this.resolve_requested_agent_session_id(legacy_agent_session_id);
 
         if (!agent_session_id || typeof tool_name !== "string") {
           throw new tool_error("INVALID_ARGUMENT", "tools/call requires agent_session_id and name", false);
@@ -204,14 +215,16 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "session/close") {
-        const resolved_agent_session_id = this.resolve_requested_agent_session_id(request.params?.agent_session_id);
+        const resolved_agent_session_id = this.resolve_requested_agent_session_id(request.params?.agent_session_id, {
+          allow_implicit_rebind: false,
+        });
         if (!resolved_agent_session_id) {
           throw new tool_error("INVALID_ARGUMENT", "session/close requires agent_session_id", false);
         }
 
         const result = await this.runtime.tool_router.close_session(resolved_agent_session_id);
         if (this.initialized_agent_session_id === resolved_agent_session_id) {
-          this.clear_initialized_agent_session_id();
+          this.clear_initialized_client_state();
         }
 
         return {
@@ -222,7 +235,7 @@ export class mcp_protocol_session {
       }
 
       if (request.method === "sessions/list") {
-        this.touch_initialized_session_if_present();
+        this.touch_or_rebind_initialized_session_if_present();
         return {
           jsonrpc: "2.0",
           id: request.id ?? null,
@@ -304,13 +317,29 @@ export class mcp_protocol_session {
     }
   }
 
-  private touch_initialized_session_if_present(): void {
-    const initialized_agent_session_id = this.resolve_initialized_agent_session_id();
+  private clear_initialized_client_state(): void {
+    this.clear_initialized_agent_session_id();
+    this.initialized_client_name = undefined;
+    this.initialized_token = undefined;
+    this.initialized_auth_mode = null;
+  }
+
+  private touch_or_rebind_initialized_session_if_present(): void {
+    const initialized_agent_session_id = this.ensure_initialized_agent_session_id();
     if (!initialized_agent_session_id) {
       return;
     }
 
     this.touch_session(initialized_agent_session_id);
+  }
+
+  private touch_or_rebind_initialized_session_for_notification(): void {
+    try {
+      this.touch_or_rebind_initialized_session_if_present();
+    } catch (error) {
+      this.clear_initialized_client_state();
+      console.error("failed to refresh MCP notification session", error);
+    }
   }
 
   private touch_session(agent_session_id: string): void {
@@ -330,9 +359,40 @@ export class mcp_protocol_session {
     return this.initialized_agent_session_id;
   }
 
-  private resolve_requested_agent_session_id(explicit_agent_session_id: unknown): string | null {
+  private ensure_initialized_agent_session_id(): string | null {
+    const initialized_agent_session_id = this.resolve_initialized_agent_session_id();
+    if (initialized_agent_session_id) {
+      return initialized_agent_session_id;
+    }
+
+    if (!this.initialized_auth_mode) {
+      return null;
+    }
+
+    let result: { agent_session_id: string };
+    try {
+      result = this.runtime.tool_router.open_session(this.initialized_client_name, this.initialized_token);
+    } catch (error) {
+      this.clear_initialized_client_state();
+      throw error;
+    }
+
+    const session = this.runtime.session_registry.get_session(result.agent_session_id);
+    this.initialized_auth_mode = session.auth_mode;
+    this.set_initialized_agent_session_id(result.agent_session_id);
+    return result.agent_session_id;
+  }
+
+  private resolve_requested_agent_session_id(
+    explicit_agent_session_id: unknown,
+    options: { allow_implicit_rebind?: boolean } = {},
+  ): string | null {
     if (typeof explicit_agent_session_id !== "string" || explicit_agent_session_id.length === 0) {
-      return this.resolve_initialized_agent_session_id();
+      if (options.allow_implicit_rebind === false) {
+        return this.resolve_initialized_agent_session_id();
+      }
+
+      return this.ensure_initialized_agent_session_id();
     }
 
     if (this.runtime.session_registry.has_session(explicit_agent_session_id)) {

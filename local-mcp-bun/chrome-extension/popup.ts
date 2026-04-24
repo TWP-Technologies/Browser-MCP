@@ -5,6 +5,7 @@ import {
   compute_next_toggle_target_enabled,
   format_cleanup_chip_label,
   format_snapshot_badge_timestamp,
+  has_valid_resource_reaped_at,
   is_session_overdue,
   resolve_toggle_reference_enabled,
 } from "./popup_view_model";
@@ -36,6 +37,7 @@ interface session_snapshot {
   client_name?: string;
   connected_at: string;
   last_seen_at: string;
+  resource_reaped_at?: string;
   state: string;
   owned_tab_ids: number[];
 }
@@ -81,7 +83,9 @@ interface close_all_sessions_result {
 
 interface stale_cleanup_result {
   stale_session_timeout_minutes?: number;
+  attempted_session_ids?: string[];
   stale_session_ids?: string[];
+  reaped_session_ids?: string[];
   closed_session_ids?: string[];
   failed?: Array<{
     agent_session_id?: string;
@@ -871,7 +875,9 @@ function sync_modal_accessibility_dom(): void {
 
 function summarize_stale_cleanup_result(payload: stale_cleanup_result): { info_message?: string; error_message?: string } {
   const failed_rows = Array.isArray(payload.failed) ? payload.failed : [];
+  const reaped_count = Array.isArray(payload.reaped_session_ids) ? payload.reaped_session_ids.length : 0;
   const closed_count = Array.isArray(payload.closed_session_ids) ? payload.closed_session_ids.length : 0;
+  const cleaned_count = reaped_count + closed_count;
 
   if (failed_rows.length > 0) {
     const failed_summary = failed_rows
@@ -883,13 +889,25 @@ function summarize_stale_cleanup_result(payload: stale_cleanup_result): { info_m
       .join("; ");
 
     return {
-      error_message: `Cleanup completed with failures${closed_count > 0 ? ` after closing ${closed_count} session${closed_count === 1 ? "" : "s"}` : ""}: ${failed_summary}`,
+      error_message: `Cleanup completed with failures${cleaned_count > 0 ? ` after cleaning ${cleaned_count} session${cleaned_count === 1 ? "" : "s"}` : ""}: ${failed_summary}`,
     };
   }
 
-  if (closed_count > 0) {
+  if (cleaned_count > 0) {
+    if (reaped_count > 0 && closed_count > 0) {
+      return {
+        info_message: `Released resources for ${reaped_count} stale session${reaped_count === 1 ? "" : "s"} and closed ${closed_count} expired session${closed_count === 1 ? "" : "s"}.`,
+      };
+    }
+
+    if (reaped_count > 0) {
+      return {
+        info_message: `Released resources for ${reaped_count} stale session${reaped_count === 1 ? "" : "s"}.`,
+      };
+    }
+
     return {
-      info_message: `Closed ${closed_count} stale session${closed_count === 1 ? "" : "s"}.`,
+      info_message: `Closed ${closed_count} expired session${closed_count === 1 ? "" : "s"}.`,
     };
   }
 
@@ -1073,6 +1091,7 @@ function render_session_rows(
           typeof stale_session_timeout_minutes === "number"
             ? is_session_overdue(session, stale_session_timeout_minutes, now_ms)
             : false;
+        const resource_reaped = has_valid_resource_reaped_at(session);
         const state_chip_class =
           session.state === "connected" ? "chip--state-online" : session.state === "disconnecting" ? "chip--state-pending" : "chip--state-offline";
 
@@ -1085,6 +1104,7 @@ function render_session_rows(
                   <div class="session-state-cell">
                     <span class="chip chip--compact ${state_chip_class}">${escape_html(session.state || "connected")}</span>
                     ${overdue ? '<span class="chip chip--compact chip--state-pending">overdue</span>' : ""}
+                    ${resource_reaped ? '<span class="chip chip--compact chip--state-pending">resources released</span>' : ""}
                   </div>
                 </td>
                 <td>${escape_html(owned_tabs)}</td>
@@ -1311,9 +1331,9 @@ function render(): void {
       <div class="modal-backdrop ${cleanup_modal_open ? "" : "modal-backdrop--hidden"}" data-testid="cleanup-modal-backdrop">
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cleanup-modal-title">
           <h3 id="cleanup-modal-title">Session Auto-cleanup</h3>
-          <p>Hard-reaps stale sessions, detaches owned tabs, cancels queued locks, and closes stale proxy connections.</p>
+          <p>Releases stale browser resources while keeping live agent transports recoverable.</p>
           <label class="modal-field modal-field--toggle" for="cleanup-enabled-input">
-            <span>Enable auto-close</span>
+            <span>Enable auto-cleanup</span>
             <input
               id="cleanup-enabled-input"
               type="checkbox"

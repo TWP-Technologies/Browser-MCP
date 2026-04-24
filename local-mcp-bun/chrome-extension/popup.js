@@ -1,4 +1,3 @@
-// Modified by [KnotFalse]
 // chrome-extension/popup_view_model.ts
 function pad_2(value) {
   return String(value).padStart(2, "0");
@@ -48,8 +47,17 @@ function format_cleanup_chip_label(stale_session_timeout_minutes) {
   }
   return `Auto-cleanup ${stale_session_timeout_minutes}m`;
 }
+function has_valid_resource_reaped_at(session) {
+  if (typeof session.resource_reaped_at !== "string" || session.resource_reaped_at.length === 0) {
+    return false;
+  }
+  return Number.isFinite(Date.parse(session.resource_reaped_at));
+}
 function is_session_overdue(session, stale_session_timeout_minutes, now_ms = Date.now()) {
   if (!Number.isFinite(stale_session_timeout_minutes) || stale_session_timeout_minutes <= 0) {
+    return false;
+  }
+  if (has_valid_resource_reaped_at(session)) {
     return false;
   }
   const parsed_last_seen_at = Date.parse(session.last_seen_at);
@@ -689,7 +697,9 @@ function sync_modal_accessibility_dom() {
 }
 function summarize_stale_cleanup_result(payload) {
   const failed_rows = Array.isArray(payload.failed) ? payload.failed : [];
+  const reaped_count = Array.isArray(payload.reaped_session_ids) ? payload.reaped_session_ids.length : 0;
   const closed_count = Array.isArray(payload.closed_session_ids) ? payload.closed_session_ids.length : 0;
+  const cleaned_count = reaped_count + closed_count;
   if (failed_rows.length > 0) {
     const failed_summary = failed_rows.map((entry) => {
       const agent_session_id = typeof entry.agent_session_id === "string" ? entry.agent_session_id : "unknown-session";
@@ -697,12 +707,22 @@ function summarize_stale_cleanup_result(payload) {
       return `${agent_session_id}: ${message}`;
     }).join("; ");
     return {
-      error_message: `Cleanup completed with failures${closed_count > 0 ? ` after closing ${closed_count} session${closed_count === 1 ? "" : "s"}` : ""}: ${failed_summary}`
+      error_message: `Cleanup completed with failures${cleaned_count > 0 ? ` after cleaning ${cleaned_count} session${cleaned_count === 1 ? "" : "s"}` : ""}: ${failed_summary}`
     };
   }
-  if (closed_count > 0) {
+  if (cleaned_count > 0) {
+    if (reaped_count > 0 && closed_count > 0) {
+      return {
+        info_message: `Released resources for ${reaped_count} stale session${reaped_count === 1 ? "" : "s"} and closed ${closed_count} expired session${closed_count === 1 ? "" : "s"}.`
+      };
+    }
+    if (reaped_count > 0) {
+      return {
+        info_message: `Released resources for ${reaped_count} stale session${reaped_count === 1 ? "" : "s"}.`
+      };
+    }
     return {
-      info_message: `Closed ${closed_count} stale session${closed_count === 1 ? "" : "s"}.`
+      info_message: `Closed ${closed_count} expired session${closed_count === 1 ? "" : "s"}.`
     };
   }
   return {
@@ -851,6 +871,7 @@ function render_session_rows(sessions, disable_all, stale_session_timeout_minute
     const client_name = session.client_name && session.client_name.length > 0 ? session.client_name : "-";
     const owned_tabs = session.owned_tab_ids.length > 0 ? session.owned_tab_ids.join(", ") : "-";
     const overdue = typeof stale_session_timeout_minutes === "number" ? is_session_overdue(session, stale_session_timeout_minutes, now_ms) : false;
+    const resource_reaped = has_valid_resource_reaped_at(session);
     const state_chip_class = session.state === "connected" ? "chip--state-online" : session.state === "disconnecting" ? "chip--state-pending" : "chip--state-offline";
     return `<tr>
                 <td>
@@ -861,6 +882,7 @@ function render_session_rows(sessions, disable_all, stale_session_timeout_minute
                   <div class="session-state-cell">
                     <span class="chip chip--compact ${state_chip_class}">${escape_html(session.state || "connected")}</span>
                     ${overdue ? '<span class="chip chip--compact chip--state-pending">overdue</span>' : ""}
+                    ${resource_reaped ? '<span class="chip chip--compact chip--state-pending">resources released</span>' : ""}
                   </div>
                 </td>
                 <td>${escape_html(owned_tabs)}</td>
@@ -1060,9 +1082,9 @@ function render() {
       <div class="modal-backdrop ${cleanup_modal_open ? "" : "modal-backdrop--hidden"}" data-testid="cleanup-modal-backdrop">
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cleanup-modal-title">
           <h3 id="cleanup-modal-title">Session Auto-cleanup</h3>
-          <p>Hard-reaps stale sessions, detaches owned tabs, cancels queued locks, and closes stale proxy connections.</p>
+          <p>Releases stale browser resources while keeping live agent transports recoverable.</p>
           <label class="modal-field modal-field--toggle" for="cleanup-enabled-input">
-            <span>Enable auto-close</span>
+            <span>Enable auto-cleanup</span>
             <input
               id="cleanup-enabled-input"
               type="checkbox"

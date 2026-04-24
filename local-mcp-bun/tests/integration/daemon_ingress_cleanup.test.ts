@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { daemon_ingress_server } from "../../src/daemon_ingress_server";
 import { local_mcp_runtime } from "../../src/runtime";
 
@@ -7,11 +10,57 @@ interface initialize_response {
   id: string | number | null;
   result?: {
     agent_session_id?: string;
+    structuredContent?: Record<string, unknown>;
   };
 }
 
 function random_port(): number {
-  return 44500 + Math.floor(Math.random() * 1000);
+  return 30000 + Math.floor(Math.random() * 20000);
+}
+
+async function create_test_ingress(cleanup_interval_ms: number): Promise<{
+  runtime: local_mcp_runtime;
+  ingress: daemon_ingress_server;
+  daemon_port: number;
+  daemon_state_dir: string;
+}> {
+  let last_error: unknown;
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const daemon_port = random_port();
+    const bridge_port = random_port();
+    const daemon_state_dir = mkdtempSync(join(tmpdir(), "local-mcp-daemon-test-"));
+    const daemon_state_path = join(daemon_state_dir, "daemon-state.json");
+    const runtime = new local_mcp_runtime({
+      bridge_mode: "in_memory",
+      bridge_host: "127.0.0.1",
+      bridge_port,
+      session_idle_timeout_minutes: 120,
+    });
+
+    try {
+      const ingress = new daemon_ingress_server({
+        runtime,
+        daemon_host: "127.0.0.1",
+        daemon_port,
+        bridge_host: "127.0.0.1",
+        bridge_port,
+        daemon_state_path,
+        idle_timeout_ms: 60_000,
+        cleanup_interval_ms,
+        auth_enabled: false,
+        on_idle_timeout: async () => {},
+      });
+
+      return { runtime, ingress, daemon_port, daemon_state_dir };
+    } catch (error) {
+      last_error = error;
+      await runtime.stop();
+      rmSync(daemon_state_dir, { recursive: true, force: true });
+    }
+  }
+
+  throw last_error instanceof Error ? last_error : new Error("failed to create daemon ingress");
 }
 
 async function wait_for_socket_open(socket: WebSocket): Promise<void> {
@@ -42,46 +91,60 @@ async function wait_for_initialize_response(socket: WebSocket): Promise<initiali
   });
 }
 
-async function wait_for_socket_close(socket: WebSocket): Promise<CloseEvent> {
-  return await new Promise<CloseEvent>((resolve_promise, reject_promise) => {
+async function wait_for_response(socket: WebSocket, id: string): Promise<initialize_response> {
+  return await new Promise<initialize_response>((resolve_promise, reject_promise) => {
+    const on_message = (event: MessageEvent): void => {
+      const response = JSON.parse(String(event.data)) as initialize_response;
+      if (response.id !== id) {
+        return;
+      }
+
+      clearTimeout(timeout_id);
+      socket.removeEventListener("message", on_message);
+      socket.removeEventListener("error", on_error);
+      resolve_promise(response);
+    };
+    const on_error = (): void => {
+      clearTimeout(timeout_id);
+      socket.removeEventListener("message", on_message);
+      socket.removeEventListener("error", on_error);
+      reject_promise(new Error("websocket message failed"));
+    };
     const timeout_id = setTimeout(() => {
-      reject_promise(new Error("timed out waiting for socket close"));
+      socket.removeEventListener("message", on_message);
+      socket.removeEventListener("error", on_error);
+      reject_promise(new Error(`timed out waiting for response ${id}`));
     }, 5_000);
 
-    socket.addEventListener("close", (event) => {
-      clearTimeout(timeout_id);
-      resolve_promise(event);
-    });
-    socket.addEventListener("error", () => {
-      clearTimeout(timeout_id);
-      reject_promise(new Error("websocket close failed"));
-    });
+    socket.addEventListener("message", on_message);
+    socket.addEventListener("error", on_error);
   });
 }
 
-test("daemon ingress closes stale bound sockets during cleanup sweeps", async () => {
-  const daemon_port = random_port();
-  const runtime = new local_mcp_runtime({
-    bridge_mode: "in_memory",
-    bridge_host: "127.0.0.1",
-    bridge_port: daemon_port + 1000,
-    session_idle_timeout_minutes: 120,
-  });
+async function wait_for_condition(predicate: () => boolean, timeout_ms = 5_000, interval_ms = 25): Promise<void> {
+  const started_at = Date.now();
 
-  const ingress = new daemon_ingress_server({
-    runtime,
-    daemon_host: "127.0.0.1",
-    daemon_port,
-    bridge_host: "127.0.0.1",
-    bridge_port: daemon_port + 1000,
-    daemon_state_path: "/tmp/local-mcp-daemon-test.json",
-    idle_timeout_ms: 60_000,
-    cleanup_interval_ms: 25,
-    auth_enabled: false,
-    on_idle_timeout: async () => {},
-  });
+  while (Date.now() - started_at < timeout_ms) {
+    if (predicate()) {
+      return;
+    }
+
+    await new Promise((resolve_promise) => {
+      setTimeout(resolve_promise, interval_ms);
+    });
+  }
+
+  throw new Error("timed out waiting for condition");
+}
+
+test("daemon ingress soft-reaps stale bound sessions without closing the socket", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
 
   const socket = new WebSocket(`ws://127.0.0.1:${daemon_port}/mcp`);
+  let close_event: CloseEvent | null = null;
+  socket.addEventListener("close", (event) => {
+    close_event = event;
+  });
 
   try {
     await wait_for_socket_open(socket);
@@ -103,16 +166,39 @@ test("daemon ingress closes stale bound sockets during cleanup sweeps", async ()
 
     const initialize_response = await wait_for_initialize_response(socket);
     const agent_session_id = initialize_response.result?.agent_session_id;
-    expect(typeof agent_session_id).toBe("string");
+    if (typeof agent_session_id !== "string") {
+      throw new Error("expected initialized session");
+    }
 
-    runtime.session_registry.get_session(agent_session_id as string).last_seen_at = new Date(
+    runtime.session_registry.get_session(agent_session_id).last_seen_at = new Date(
       Date.now() - 3 * 60 * 60 * 1000,
     ).toISOString();
 
-    const closed_event = await wait_for_socket_close(socket);
-    expect(closed_event.reason).toBe("stale_session_timeout");
-    expect(runtime.session_registry.list_active_sessions()).toEqual([]);
-    expect(ingress.get_health_snapshot().active_proxy_connections).toBe(0);
+    await wait_for_condition(
+      () => typeof runtime.session_registry.get_session(agent_session_id).resource_reaped_at === "string",
+    );
+
+    expect(close_event).toBeNull();
+    expect(runtime.session_registry.list_active_sessions()).toEqual([agent_session_id]);
+    expect(ingress.get_health_snapshot().active_proxy_connections).toBe(1);
+
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "tabs",
+        method: "tools/call",
+        params: {
+          name: "list_available_tabs",
+          arguments: {},
+        },
+      })}\n`,
+    );
+
+    const tabs_response = await wait_for_response(socket, "tabs");
+    const structured_content = tabs_response.result?.structuredContent;
+    expect(Array.isArray(structured_content?.tabs)).toBe(true);
+    expect(runtime.session_registry.get_session(agent_session_id).resource_reaped_at).toBeUndefined();
+    expect(close_event).toBeNull();
   } finally {
     try {
       socket.close();
@@ -122,32 +208,18 @@ test("daemon ingress closes stale bound sockets during cleanup sweeps", async ()
 
     await ingress.stop();
     await runtime.stop();
+    rmSync(daemon_state_dir, { recursive: true, force: true });
   }
 });
 
-test("daemon ingress closes sockets whose sessions were closed elsewhere", async () => {
-  const daemon_port = random_port();
-  const runtime = new local_mcp_runtime({
-    bridge_mode: "in_memory",
-    bridge_host: "127.0.0.1",
-    bridge_port: daemon_port + 1000,
-    session_idle_timeout_minutes: 120,
-  });
-
-  const ingress = new daemon_ingress_server({
-    runtime,
-    daemon_host: "127.0.0.1",
-    daemon_port,
-    bridge_host: "127.0.0.1",
-    bridge_port: daemon_port + 1000,
-    daemon_state_path: "/tmp/local-mcp-daemon-test.json",
-    idle_timeout_ms: 60_000,
-    cleanup_interval_ms: 25,
-    auth_enabled: false,
-    on_idle_timeout: async () => {},
-  });
+test("daemon ingress lets live sockets rebind when their session was closed elsewhere", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
 
   const socket = new WebSocket(`ws://127.0.0.1:${daemon_port}/mcp`);
+  let close_event: CloseEvent | null = null;
+  socket.addEventListener("close", (event) => {
+    close_event = event;
+  });
 
   try {
     await wait_for_socket_open(socket);
@@ -169,14 +241,56 @@ test("daemon ingress closes sockets whose sessions were closed elsewhere", async
 
     const initialize_response = await wait_for_initialize_response(socket);
     const agent_session_id = initialize_response.result?.agent_session_id;
-    expect(typeof agent_session_id).toBe("string");
+    if (typeof agent_session_id !== "string") {
+      throw new Error("expected initialized session");
+    }
 
-    await runtime.tool_router.close_session(agent_session_id as string);
+    const ingress_internals = ingress as unknown as {
+      agent_session_id_by_connection_id: Map<number, string>;
+      last_activity_at_ms_by_connection_id: Map<number, number>;
+      run_cleanup_tick: () => Promise<void>;
+    };
+    const connection_id = [...ingress_internals.agent_session_id_by_connection_id.entries()].find(
+      ([, mapped_agent_session_id]) => mapped_agent_session_id === agent_session_id,
+    )?.[0];
+    if (typeof connection_id !== "number") {
+      throw new Error("expected bound daemon connection");
+    }
 
-    const closed_event = await wait_for_socket_close(socket);
-    expect(closed_event.reason).toBe("session_closed");
-    expect(runtime.session_registry.list_active_sessions()).toEqual([]);
-    expect(ingress.get_health_snapshot().active_proxy_connections).toBe(0);
+    await runtime.tool_router.close_session(agent_session_id);
+    ingress_internals.last_activity_at_ms_by_connection_id.set(connection_id, Date.now() - 3 * 60 * 60 * 1000);
+    const before_cleanup_ms = Date.now();
+    await ingress_internals.run_cleanup_tick();
+
+    expect(ingress_internals.agent_session_id_by_connection_id.has(connection_id)).toBe(false);
+    expect(ingress_internals.last_activity_at_ms_by_connection_id.get(connection_id)).toBeGreaterThanOrEqual(
+      before_cleanup_ms,
+    );
+    await ingress_internals.run_cleanup_tick();
+    expect(close_event).toBeNull();
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "tabs-after-close",
+        method: "tools/call",
+        params: {
+          name: "list_available_tabs",
+          arguments: {},
+        },
+      })}\n`,
+    );
+
+    const tabs_response = await wait_for_response(socket, "tabs-after-close");
+    const structured_content = tabs_response.result?.structuredContent;
+    const active_sessions = runtime.session_registry.list_active_sessions();
+
+    expect(Array.isArray(structured_content?.tabs)).toBe(true);
+    expect(active_sessions).toHaveLength(1);
+    expect(active_sessions[0]).not.toBe(agent_session_id);
+    expect(close_event).toBeNull();
+    expect(ingress.get_health_snapshot().active_proxy_connections).toBe(1);
   } finally {
     try {
       socket.close();
@@ -186,5 +300,6 @@ test("daemon ingress closes sockets whose sessions were closed elsewhere", async
 
     await ingress.stop();
     await runtime.stop();
+    rmSync(daemon_state_dir, { recursive: true, force: true });
   }
 });
