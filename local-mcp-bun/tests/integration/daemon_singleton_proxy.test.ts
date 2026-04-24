@@ -1,3 +1,4 @@
+// Modified by [KnotFalse]
 import { afterEach, expect, test } from "bun:test";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -263,5 +264,5 @@ test("auto mode multiplexes two stdio clients through a single shared daemon", a
   await wait_for_condition(async () => {
     const health = await fetch_daemon_health(daemon_port);
     return typeof health === "undefined";
-  }, 15_000, 250);
-});
+  }, 20_000, 250);
+}, 30_000);

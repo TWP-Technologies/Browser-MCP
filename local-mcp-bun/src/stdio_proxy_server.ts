@@ -1,6 +1,75 @@
+// Modified by [KnotFalse]
+import { resolve as resolve_path } from "node:path";
+import { is_loopback_host } from "./config";
+
 interface stdio_proxy_server_options {
   daemon_url: string;
   connect_timeout_ms: number;
+  attach_client_artifact_root?: boolean;
+  artifact_root_token?: string;
+}
+
+function should_attach_client_artifact_root(daemon_url: string, configured?: boolean): boolean {
+  if (typeof configured === "boolean") {
+    return configured;
+  }
+
+  const url = new URL(daemon_url);
+  return is_loopback_host(url.hostname);
+}
+
+function resolve_current_working_directory(): string | undefined {
+  try {
+    return process.cwd();
+  } catch {
+    return undefined;
+  }
+}
+
+export function build_daemon_url_with_client_artifact_root(
+  daemon_url: string,
+  artifact_root?: string,
+  attach_client_artifact_root?: boolean,
+  artifact_root_token?: string,
+): string {
+  const url = new URL(daemon_url);
+  const attach_artifact_root = should_attach_client_artifact_root(daemon_url, attach_client_artifact_root);
+  if (!attach_artifact_root) {
+    url.searchParams.delete("client_artifact_root");
+    url.searchParams.delete("client_artifact_root_token");
+    return url.toString();
+  }
+
+  const has_client_artifact_root = url.searchParams.has("client_artifact_root");
+
+  if (!has_client_artifact_root) {
+    const resolved_artifact_root = artifact_root ?? resolve_current_working_directory();
+    if (!resolved_artifact_root) {
+      url.searchParams.delete("client_artifact_root_token");
+      return url.toString();
+    }
+
+    url.searchParams.set("client_artifact_root", resolve_path(resolved_artifact_root));
+  }
+
+  if (artifact_root_token) {
+    url.searchParams.set("client_artifact_root_token", artifact_root_token);
+  }
+
+  return url.toString();
+}
+
+export function redact_daemon_url_for_logs(daemon_url: string): string {
+  const url = new URL(daemon_url);
+  if (url.searchParams.has("client_artifact_root")) {
+    url.searchParams.set("client_artifact_root", "<redacted>");
+  }
+
+  if (url.searchParams.has("client_artifact_root_token")) {
+    url.searchParams.set("client_artifact_root_token", "<redacted>");
+  }
+
+  return url.toString();
 }
 
 function is_graceful_daemon_close_reason(reason: string): boolean {
@@ -17,7 +86,24 @@ export class stdio_proxy_server {
   private exited: boolean;
 
   public constructor(options: stdio_proxy_server_options) {
-    this.daemon_url = options.daemon_url;
+    const artifact_root = resolve_current_working_directory();
+    const should_attach_artifact_root = should_attach_client_artifact_root(
+      options.daemon_url,
+      options.attach_client_artifact_root,
+    );
+    const has_explicit_client_artifact_root = new URL(options.daemon_url).searchParams.has("client_artifact_root");
+    const attach_client_artifact_root =
+      should_attach_artifact_root && (typeof artifact_root === "string" || has_explicit_client_artifact_root);
+    if (should_attach_artifact_root && !artifact_root && !has_explicit_client_artifact_root) {
+      console.error("[daemon] client cwd unavailable; connecting without per-client artifact root metadata");
+    }
+
+    this.daemon_url = build_daemon_url_with_client_artifact_root(
+      options.daemon_url,
+      artifact_root,
+      attach_client_artifact_root,
+      options.artifact_root_token,
+    );
     this.connect_timeout_ms = options.connect_timeout_ms;
     this.line_buffer = "";
     this.closing_intent = false;
@@ -55,6 +141,7 @@ export class stdio_proxy_server {
   private async connect(): Promise<WebSocket> {
     return await new Promise<WebSocket>((resolve, reject) => {
       const socket = new WebSocket(this.daemon_url);
+      const redacted_daemon_url = redact_daemon_url_for_logs(this.daemon_url);
 
       const timeout_id = setTimeout(() => {
         try {
@@ -62,7 +149,7 @@ export class stdio_proxy_server {
         } catch {
           // ignore timeout close race
         }
-        reject(new Error(`timed out connecting to daemon ingress at ${this.daemon_url}`));
+        reject(new Error(`timed out connecting to daemon ingress at ${redacted_daemon_url}`));
       }, this.connect_timeout_ms);
 
       socket.addEventListener("open", () => {
@@ -72,7 +159,7 @@ export class stdio_proxy_server {
 
       socket.addEventListener("error", () => {
         clearTimeout(timeout_id);
-        reject(new Error(`failed to connect to daemon ingress at ${this.daemon_url}`));
+        reject(new Error(`failed to connect to daemon ingress at ${redacted_daemon_url}`));
       });
     });
   }

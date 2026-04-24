@@ -1,3 +1,4 @@
+// Modified by [KnotFalse]
 import { expect, test } from "bun:test";
 import { session_registry } from "../../src/session_registry";
 import { tool_error } from "../../src/errors";
@@ -49,6 +50,34 @@ test("session_registry emits stable snapshots with owned tabs", () => {
 
   expect(alpha_snapshot?.owned_tab_ids).toEqual([101, 202]);
   expect(beta_snapshot?.owned_tab_ids).toEqual([303]);
+  expect("artifact_root" in (alpha as unknown as Record<string, unknown>)).toBe(false);
+  expect("artifact_root_real" in (alpha as unknown as Record<string, unknown>)).toBe(false);
+  expect("artifact_root" in (alpha_snapshot as unknown as Record<string, unknown>)).toBe(false);
+  expect("artifact_root_real" in (alpha_snapshot as unknown as Record<string, unknown>)).toBe(false);
+});
+
+test("session_registry stores and returns artifact root context copies", () => {
+  const registry = new session_registry();
+  const artifact_root_context = {
+    artifact_root: "/workspace-a",
+    artifact_root_real: "/workspace-a",
+  };
+  const session = registry.create_session("artifact-context", "none", artifact_root_context);
+
+  artifact_root_context.artifact_root = "/mutated-workspace";
+
+  const stored_context = registry.get_session_artifact_root_context(session.agent_session_id);
+  expect(stored_context).toEqual({
+    artifact_root: "/workspace-a",
+    artifact_root_real: "/workspace-a",
+  });
+
+  stored_context.artifact_root = "/returned-mutation";
+
+  expect(registry.get_session_artifact_root_context(session.agent_session_id)).toEqual({
+    artifact_root: "/workspace-a",
+    artifact_root_real: "/workspace-a",
+  });
 });
 
 test("session_registry lists stale sessions from last_seen_at", () => {

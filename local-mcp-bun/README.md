@@ -45,6 +45,8 @@ Default runtime is:
 
 With defaults, each MCP client process is a stdio proxy that auto-connects to a shared local daemon. The daemon owns the browser bridge bind (`BRIDGE_PORT`) and supports multiple concurrent MCP clients.
 
+Relative artifact paths for screenshot and PDF tools are resolved against the calling MCP client process cwd. In shared-daemon mode, the stdio proxy passes that cwd to the daemon once during connection setup with a daemon-issued artifact-root token, so callers do not need to include workspace metadata in every tool call. The proxy only adds this metadata automatically when the daemon state and requested daemon host are loopback-scoped; set `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=1` to opt in explicitly or `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=0` to disable it.
+
 ### Daemon Modes
 
 - `MCP_DAEMON_MODE=auto` (default for `BRIDGE_MODE=websocket`): connect to existing daemon or spawn one, then proxy stdio to daemon ingress.
@@ -76,10 +78,14 @@ You only need to set bridge env vars when overriding defaults (for example custo
 - `MCP_DAEMON_IDLE_TIMEOUT_MS` defaults to `900000` (15 minutes).
 - `MCP_DAEMON_CONNECT_TIMEOUT_MS` defaults to `10000`.
 - `MCP_SESSION_IDLE_TIMEOUT_MINUTES` defaults to `120`; set `0` to disable automatic stale-session cleanup.
-- `MCP_DAEMON_STATE_PATH` overrides daemon metadata path (default temp path keyed by daemon port).
+- `MCP_DAEMON_STATE_PATH` overrides daemon metadata path (default temp path keyed by daemon port). Daemon state includes local-only connection capabilities and is written with owner-only file permissions where the host OS supports them.
 - `MCP_AUTH_TOKEN=<value>` enables token auth with explicit value.
 - `MCP_AUTH_TOKEN=auto` or `MCP_AUTH_AUTO=1` enables token auth with auto token generated/reused by the daemon runtime and persisted in daemon state metadata.
 - If auth env vars are not set, auth remains disabled (local loopback boundary still enforced).
+- `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=1` or `true` forces the stdio proxy to send client cwd metadata to non-loopback daemon ingress. Use this only when the daemon can resolve the same filesystem paths and MCP auth is enabled.
+- `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=0` or `false` prevents automatic cwd metadata attachment even when the daemon reports a loopback bind host, which is useful for SSH tunnels to remote daemons.
+- `client_artifact_root` connection metadata is accepted only with the matching daemon-issued `client_artifact_root_token`, and only when daemon ingress is loopback-bound or MCP auth is enabled. Do not expose unauthenticated daemon ingress on non-loopback interfaces.
+- If automatic artifact-root attachment is expected but the daemon-issued artifact-root token is missing or stale, proxy startup fails; set `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=0` to explicitly use the shared daemon cwd for artifact paths.
 
 ### Stale Session Cleanup
 

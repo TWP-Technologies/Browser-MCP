@@ -1,6 +1,13 @@
+// Modified by [KnotFalse]
 import { generate_agent_session_id, now_iso_string } from "./id";
 import { tool_error } from "./errors";
+import { clone_artifact_root_context, resolve_default_artifact_root, type artifact_root_context } from "./artifacts";
 import type { agent_session, session_snapshot } from "./types";
+
+interface agent_session_record {
+  session: agent_session;
+  artifact_root_context: artifact_root_context;
+}
 
 function parse_session_timestamp_ms(iso_timestamp: string): number | undefined {
   const parsed = Date.parse(iso_timestamp);
@@ -41,13 +48,17 @@ function is_reaped_session_expired_for_cutoff(session: agent_session, stale_befo
 }
 
 export class session_registry {
-  private readonly sessions_by_id: Map<string, agent_session>;
+  private readonly sessions_by_id: Map<string, agent_session_record>;
 
   public constructor() {
-    this.sessions_by_id = new Map<string, agent_session>();
+    this.sessions_by_id = new Map<string, agent_session_record>();
   }
 
-  public create_session(client_name?: string, auth_mode: "none" | "token" = "none"): agent_session {
+  public create_session(
+    client_name?: string,
+    auth_mode: "none" | "token" = "none",
+    artifact_root_context: artifact_root_context = resolve_default_artifact_root(),
+  ): agent_session {
     let candidate = generate_agent_session_id(client_name);
     while (this.sessions_by_id.has(candidate)) {
       candidate = generate_agent_session_id(client_name);
@@ -64,19 +75,33 @@ export class session_registry {
       owned_tab_ids: new Set<number>(),
     };
 
-    this.sessions_by_id.set(candidate, session);
+    this.sessions_by_id.set(candidate, {
+      session,
+      artifact_root_context: clone_artifact_root_context(artifact_root_context),
+    });
     return session;
   }
 
   public get_session(agent_session_id: string): agent_session {
-    const session = this.sessions_by_id.get(agent_session_id);
-    if (!session) {
+    const record = this.sessions_by_id.get(agent_session_id);
+    if (!record) {
       throw new tool_error("SESSION_NOT_FOUND", `unknown session: ${agent_session_id}`, false, {
         agent_session_id,
       });
     }
 
-    return session;
+    return record.session;
+  }
+
+  public get_session_artifact_root_context(agent_session_id: string): artifact_root_context {
+    const record = this.sessions_by_id.get(agent_session_id);
+    if (!record) {
+      throw new tool_error("SESSION_NOT_FOUND", `unknown session: ${agent_session_id}`, false, {
+        agent_session_id,
+      });
+    }
+
+    return clone_artifact_root_context(record.artifact_root_context);
   }
 
   public has_session(agent_session_id: string): boolean {
@@ -146,7 +171,7 @@ export class session_registry {
     const stale_before_ms = now_ms - timeout_minutes * 60_000;
     const stale_session_ids: string[] = [];
 
-    for (const session of this.sessions_by_id.values()) {
+    for (const { session } of this.sessions_by_id.values()) {
       if (!is_session_stale_for_cutoff(session, stale_before_ms)) {
         continue;
       }
@@ -163,13 +188,13 @@ export class session_registry {
       return false;
     }
 
-    const session = this.sessions_by_id.get(agent_session_id);
-    if (!session) {
+    const record = this.sessions_by_id.get(agent_session_id);
+    if (!record) {
       return false;
     }
 
     const stale_before_ms = now_ms - timeout_minutes * 60_000;
-    return is_session_stale_for_cutoff(session, stale_before_ms);
+    return is_session_stale_for_cutoff(record.session, stale_before_ms);
   }
 
   public list_expired_reaped_session_ids(timeout_minutes: number, now_ms = Date.now()): string[] {
@@ -180,7 +205,7 @@ export class session_registry {
     const stale_before_ms = now_ms - timeout_minutes * 60_000;
     const expired_session_ids: string[] = [];
 
-    for (const session of this.sessions_by_id.values()) {
+    for (const { session } of this.sessions_by_id.values()) {
       if (!is_reaped_session_expired_for_cutoff(session, stale_before_ms)) {
         continue;
       }
@@ -197,19 +222,19 @@ export class session_registry {
       return false;
     }
 
-    const session = this.sessions_by_id.get(agent_session_id);
-    if (!session) {
+    const record = this.sessions_by_id.get(agent_session_id);
+    if (!record) {
       return false;
     }
 
     const stale_before_ms = now_ms - timeout_minutes * 60_000;
-    return is_reaped_session_expired_for_cutoff(session, stale_before_ms);
+    return is_reaped_session_expired_for_cutoff(record.session, stale_before_ms);
   }
 
   public list_session_snapshots(): session_snapshot[] {
     const snapshots: session_snapshot[] = [];
 
-    for (const session of this.sessions_by_id.values()) {
+    for (const { session } of this.sessions_by_id.values()) {
       const snapshot: session_snapshot = {
         agent_session_id: session.agent_session_id,
         client_name: session.client_name,

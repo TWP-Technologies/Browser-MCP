@@ -1,13 +1,25 @@
+// Modified by [KnotFalse]
+import { timingSafeEqual } from "node:crypto";
+import { isAbsolute } from "node:path";
+import { resolve_artifact_root, resolve_default_artifact_root, type artifact_root_context_input } from "./artifacts";
+import { is_loopback_host } from "./config";
 import { mcp_protocol_session, server_info } from "./mcp_protocol_session";
 import { local_mcp_runtime } from "./runtime";
 
 interface ingress_ws_data {
   connection_id: number;
   connected_at: string;
+  artifact_root_context: artifact_root_context_input;
 }
 
 interface closeable_socket {
   close: (code?: number, reason?: string) => void;
+}
+
+function token_equals(left: string, right: string): boolean {
+  const left_buffer = Buffer.from(left);
+  const right_buffer = Buffer.from(right);
+  return left_buffer.length === right_buffer.length && timingSafeEqual(left_buffer, right_buffer);
 }
 
 export interface daemon_health_snapshot {
@@ -39,8 +51,10 @@ interface daemon_ingress_server_options {
   idle_timeout_ms: number;
   auth_enabled: boolean;
   auth_token_hint?: string;
+  artifact_root_token?: string;
   on_idle_timeout: () => Promise<void>;
   cleanup_interval_ms?: number;
+  started_at?: string;
 }
 
 const default_cleanup_interval_ms = 60_000;
@@ -64,6 +78,7 @@ export class daemon_ingress_server {
   private readonly cleanup_interval_ms: number;
   private readonly auth_enabled: boolean;
   private readonly auth_token_hint?: string;
+  private readonly artifact_root_token?: string;
   private readonly on_idle_timeout: () => Promise<void>;
   private readonly sessions_by_connection_id: Map<number, mcp_protocol_session>;
   private readonly sockets_by_connection_id: Map<number, closeable_socket>;
@@ -89,13 +104,14 @@ export class daemon_ingress_server {
     this.cleanup_interval_ms = resolve_cleanup_interval_ms(options.cleanup_interval_ms);
     this.auth_enabled = options.auth_enabled;
     this.auth_token_hint = options.auth_token_hint;
+    this.artifact_root_token = options.artifact_root_token;
     this.on_idle_timeout = options.on_idle_timeout;
     this.sessions_by_connection_id = new Map<number, mcp_protocol_session>();
     this.sockets_by_connection_id = new Map<number, closeable_socket>();
     this.agent_session_id_by_connection_id = new Map<number, string>();
     this.connection_id_by_agent_session_id = new Map<string, number>();
     this.last_activity_at_ms_by_connection_id = new Map<number, number>();
-    this.started_at = new Date().toISOString();
+    this.started_at = options.started_at ?? new Date().toISOString();
     this.next_connection_id = 1;
     this.cleanup_in_progress = false;
     this.stopping = false;
@@ -191,12 +207,21 @@ export class daemon_ingress_server {
       return new Response("not found", { status: 404 });
     }
 
+    let artifact_root_context: artifact_root_context_input;
+    try {
+      artifact_root_context = this.resolve_connection_artifact_root(request_url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Response(message, { status: 400 });
+    }
+
     const connection_id = this.next_connection_id;
     this.next_connection_id += 1;
     const upgraded = server_instance.upgrade(request, {
       data: {
         connection_id,
         connected_at: new Date().toISOString(),
+        artifact_root_context,
       },
     });
 
@@ -212,6 +237,7 @@ export class daemon_ingress_server {
     const connection_id = socket.data.connection_id;
     const session = new mcp_protocol_session({
       runtime: this.runtime,
+      artifact_root_context: socket.data.artifact_root_context,
       on_agent_session_bound: (agent_session_id) => {
         this.bind_agent_session_to_connection(connection_id, agent_session_id);
       },
@@ -230,6 +256,38 @@ export class daemon_ingress_server {
     this.sessions_by_connection_id.set(connection_id, session);
     this.sockets_by_connection_id.set(connection_id, socket);
     this.last_activity_at_ms_by_connection_id.set(connection_id, Date.now());
+  }
+
+  private resolve_connection_artifact_root(request_url: URL): artifact_root_context_input {
+    if (!request_url.searchParams.has("client_artifact_root")) {
+      return resolve_default_artifact_root();
+    }
+
+    const raw_artifact_root = request_url.searchParams.get("client_artifact_root")?.trim() ?? "";
+    const raw_artifact_root_token = request_url.searchParams.get("client_artifact_root_token")?.trim() ?? "";
+    if (!this.artifact_root_token || !token_equals(raw_artifact_root_token, this.artifact_root_token)) {
+      throw new Error("client_artifact_root requires a daemon-issued artifact root token");
+    }
+
+    if (raw_artifact_root.length === 0) {
+      throw new Error("client_artifact_root must be a non-empty absolute path");
+    }
+
+    if (!isAbsolute(raw_artifact_root)) {
+      throw new Error("client_artifact_root must be an absolute path");
+    }
+
+    // A TCP daemon cannot infer a peer process cwd. Loopback proxy mode is the local trust boundary;
+    // network-facing daemon ingress must enable MCP auth before honoring client-supplied roots.
+    if (!is_loopback_host(this.daemon_host) && !this.auth_enabled) {
+      throw new Error("client_artifact_root requires loopback daemon ingress or MCP auth");
+    }
+
+    if (!is_loopback_host(this.daemon_host)) {
+      return () => resolve_artifact_root(raw_artifact_root);
+    }
+
+    return resolve_artifact_root(raw_artifact_root);
   }
 
   private handle_socket_message(

@@ -1,7 +1,13 @@
+// Modified by [KnotFalse]
 import { Buffer } from "node:buffer";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool_error, to_tool_error } from "./errors";
+import {
+  resolve_artifact_path,
+  resolve_artifact_root_context_input,
+  write_artifact_file,
+  type artifact_root_context,
+  type artifact_root_context_input,
+} from "./artifacts";
 import { merge_tabs_with_locks, type bridge_transport } from "./bridge_transport";
 import { session_registry } from "./session_registry";
 import { tab_lock_manager } from "./tab_lock_manager";
@@ -92,8 +98,6 @@ const passthrough_tools = [
 ] as const;
 
 const system_agent_session_id = "system-router";
-const artifact_root = resolve(process.cwd());
-const artifact_root_real = realpathSync(artifact_root);
 const default_stale_session_timeout_minutes = 120;
 const max_stale_session_timeout_minutes = 10_080;
 
@@ -179,24 +183,6 @@ const prompt_catalog = {
     render: render_network_debug_flow_prompt,
   },
 } satisfies Record<string, prompt_definition>;
-
-function is_within_root(root_path: string, candidate_path: string): boolean {
-  const relative_path = relative(root_path, candidate_path);
-  return relative_path === "" || (!relative_path.startsWith("..") && !isAbsolute(relative_path));
-}
-
-function resolve_artifact_path(requested_path: string): string {
-  const candidate_path = isAbsolute(requested_path) ? resolve(requested_path) : resolve(artifact_root, requested_path);
-
-  if (!is_within_root(artifact_root, candidate_path)) {
-    throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
-      path: requested_path,
-      artifact_root,
-    });
-  }
-
-  return candidate_path;
-}
 
 function build_invalid_argument_details(options: invalid_argument_details_options): Record<string, unknown> {
   const details: Record<string, unknown> = {
@@ -325,16 +311,43 @@ export class tool_router {
     });
   }
 
-  public open_session(client_name?: string, supplied_token?: string): { agent_session_id: string } {
+  public open_session(
+    client_name?: string,
+    supplied_token?: string,
+    artifact_root_context_input?: artifact_root_context_input,
+  ): { agent_session_id: string } {
     const auth_mode = this.assert_token_if_required(supplied_token);
-    return this.open_authenticated_session(client_name, auth_mode);
+    const artifact_root_context = this.resolve_session_artifact_root_context(artifact_root_context_input);
+    return this.open_authenticated_session(client_name, auth_mode, artifact_root_context);
+  }
+
+  private resolve_session_artifact_root_context(
+    artifact_root_context_input?: artifact_root_context_input,
+  ): artifact_root_context | undefined {
+    if (typeof artifact_root_context_input === "undefined") {
+      return undefined;
+    }
+
+    try {
+      return resolve_artifact_root_context_input(artifact_root_context_input);
+    } catch (error) {
+      if (error instanceof tool_error) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      throw new tool_error("INVALID_ARGUMENT", "invalid client artifact root", false, {
+        cause: message,
+      });
+    }
   }
 
   private open_authenticated_session(
     client_name?: string,
     auth_mode: "none" | "token" = "none",
+    artifact_root_context?: artifact_root_context,
   ): { agent_session_id: string } {
-    const session = this.session_registry.create_session(client_name, auth_mode);
+    const session = this.session_registry.create_session(client_name, auth_mode, artifact_root_context);
     void this.publish_connections_snapshot("open_session");
     return { agent_session_id: session.agent_session_id };
   }
@@ -983,8 +996,18 @@ export class tool_router {
       });
     }
 
-    this.session_registry.mark_session_recovered(agent_session_id);
+    this.mark_session_recovered_if_present(agent_session_id);
     return result;
+  }
+
+  private mark_session_recovered_if_present(agent_session_id: string): void {
+    try {
+      this.session_registry.mark_session_recovered(agent_session_id);
+    } catch (error) {
+      if (!(error instanceof tool_error) || error.code !== "SESSION_NOT_FOUND") {
+        throw error;
+      }
+    }
   }
 
   public async release_locks_for_session(agent_session_id: string): Promise<number[]> {
@@ -1912,7 +1935,7 @@ export class tool_router {
     const result = await this.bridge_transport.call_tool(tool_name, normalized_args, agent_session_id, active_tab_id);
 
     if (result && typeof result === "object") {
-      return await this.persist_artifact_if_requested(tool_name, args, result as Record<string, unknown>);
+      return await this.persist_artifact_if_requested(agent_session_id, tool_name, args, result as Record<string, unknown>);
     }
 
     return { result };
@@ -2035,6 +2058,7 @@ export class tool_router {
   }
 
   private async persist_artifact_if_requested(
+    agent_session_id: string,
     tool_name: string,
     args: Record<string, unknown>,
     result: Record<string, unknown>,
@@ -2053,49 +2077,48 @@ export class tool_router {
       return result;
     }
 
-    const absolute_path = resolve_artifact_path(requested_path);
-    const bytes = Buffer.from(data_base64, "base64");
+    let absolute_path = requested_path;
 
     try {
-      mkdirSync(dirname(absolute_path), { recursive: true });
-      const parent_real = realpathSync(dirname(absolute_path));
-      if (!is_within_root(artifact_root_real, parent_real)) {
-        throw new tool_error("INVALID_ARGUMENT", "artifact path must stay within the current workspace", false, {
-          path: requested_path,
-          artifact_root,
-        });
+      const artifact_root_context = this.session_registry.get_session_artifact_root_context(agent_session_id);
+      absolute_path = resolve_artifact_path(artifact_root_context, requested_path);
+      const bytes = Buffer.from(data_base64, "base64");
+      await write_artifact_file(artifact_root_context, absolute_path, requested_path, bytes);
+
+      const persisted_result: Record<string, unknown> = {
+        ...result,
+        saved: true,
+        path: absolute_path,
+        saved_path: absolute_path,
+        bytes: bytes.byteLength,
+      };
+
+      delete persisted_result.data_base64;
+
+      if (tool_name === "browser_pdf_save" && typeof persisted_result.mime_type !== "string") {
+        persisted_result.mime_type = "application/pdf";
       }
 
-      if (existsSync(absolute_path) && lstatSync(absolute_path).isSymbolicLink()) {
-        throw new tool_error("INVALID_ARGUMENT", "artifact path cannot target a symbolic link", false, {
-          path: requested_path,
-          artifact_root,
-        });
-      }
-
-      await Bun.write(absolute_path, bytes);
+      return persisted_result;
     } catch (error) {
+      if (error instanceof tool_error) {
+        if (error.code === "SESSION_NOT_FOUND") {
+          return {
+            ...result,
+            saved: false,
+            path: requested_path,
+            artifact_error: error.to_payload(),
+          };
+        }
+
+        throw error;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
-      throw new tool_error("INVALID_ARGUMENT", `failed to persist ${tool_name} to ${absolute_path}`, false, {
+      throw new tool_error("TOOL_FAILED", `failed to persist ${tool_name} to ${absolute_path}`, false, {
         path: absolute_path,
         cause: message,
       });
     }
-
-    const persisted_result: Record<string, unknown> = {
-      ...result,
-      saved: true,
-      path: absolute_path,
-      saved_path: absolute_path,
-      bytes: bytes.byteLength,
-    };
-
-    delete persisted_result.data_base64;
-
-    if (tool_name === "browser_pdf_save" && typeof persisted_result.mime_type !== "string") {
-      persisted_result.mime_type = "application/pdf";
-    }
-
-    return persisted_result;
   }
 }

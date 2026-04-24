@@ -1,5 +1,6 @@
+// Modified by [KnotFalse]
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { daemon_ingress_server } from "../../src/daemon_ingress_server";
@@ -12,13 +13,26 @@ interface initialize_response {
     agent_session_id?: string;
     structuredContent?: Record<string, unknown>;
   };
+  error?: {
+    code: number;
+    message: string;
+  };
 }
 
 function random_port(): number {
   return 30000 + Math.floor(Math.random() * 20000);
 }
 
-async function create_test_ingress(cleanup_interval_ms: number): Promise<{
+const test_artifact_root_token = "test-artifact-root-token";
+
+async function create_test_ingress(
+  cleanup_interval_ms: number,
+  options: {
+    daemon_host?: string;
+    auth_enabled?: boolean;
+    auth_token?: string;
+  } = {},
+): Promise<{
   runtime: local_mcp_runtime;
   ingress: daemon_ingress_server;
   daemon_port: number;
@@ -36,19 +50,21 @@ async function create_test_ingress(cleanup_interval_ms: number): Promise<{
       bridge_host: "127.0.0.1",
       bridge_port,
       session_idle_timeout_minutes: 120,
+      auth_token: options.auth_token,
     });
 
     try {
       const ingress = new daemon_ingress_server({
         runtime,
-        daemon_host: "127.0.0.1",
+        daemon_host: options.daemon_host ?? "127.0.0.1",
         daemon_port,
         bridge_host: "127.0.0.1",
         bridge_port,
         daemon_state_path,
         idle_timeout_ms: 60_000,
         cleanup_interval_ms,
-        auth_enabled: false,
+        auth_enabled: options.auth_enabled ?? typeof options.auth_token === "string",
+        artifact_root_token: test_artifact_root_token,
         on_idle_timeout: async () => {},
       });
 
@@ -208,6 +224,215 @@ test("daemon ingress soft-reaps stale bound sessions without closing the socket"
 
     await ingress.stop();
     await runtime.stop();
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress resolves relative artifact paths against connection artifact root", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
+  const artifact_root_dir = mkdtempSync(join(tmpdir(), "local-mcp-client-artifacts-"));
+
+  const socket = new WebSocket(
+    `ws://127.0.0.1:${daemon_port}/mcp?client_artifact_root=${encodeURIComponent(
+      artifact_root_dir,
+    )}&client_artifact_root_token=${encodeURIComponent(test_artifact_root_token)}`,
+  );
+
+  try {
+    await wait_for_socket_open(socket);
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "init",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: {
+            name: "artifact-root-test",
+            version: "0.0.1",
+          },
+        },
+      })}\n`,
+    );
+
+    const initialize_response = await wait_for_initialize_response(socket);
+    expect(initialize_response.error).toBeUndefined();
+    expect(typeof initialize_response.result?.agent_session_id).toBe("string");
+
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "attach",
+        method: "tools/call",
+        params: {
+          name: "attach_to_tab",
+          arguments: {
+            tab_id: 101,
+          },
+        },
+      })}\n`,
+    );
+    const attach_response = await wait_for_response(socket, "attach");
+    expect(attach_response.error).toBeUndefined();
+
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "screenshot",
+        method: "tools/call",
+        params: {
+          name: "browser_take_screenshot",
+          arguments: {
+            type: "png",
+            path: "captures/daemon.png",
+          },
+        },
+      })}\n`,
+    );
+    const screenshot_response = await wait_for_response(socket, "screenshot");
+    expect(screenshot_response.error).toBeUndefined();
+
+    const expected_path = join(artifact_root_dir, "captures/daemon.png");
+    expect(screenshot_response.result?.structuredContent?.path).toBe(expected_path);
+    expect(readFileSync(expected_path).byteLength).toBeGreaterThan(0);
+  } finally {
+    try {
+      socket.close();
+    } catch {
+      // ignore best-effort close
+    }
+
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(artifact_root_dir, { recursive: true, force: true });
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress rejects relative client artifact roots", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon_port}/mcp?client_artifact_root=relative-root&client_artifact_root_token=${encodeURIComponent(
+        test_artifact_root_token,
+      )}`,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("absolute path");
+  } finally {
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress rejects client artifact roots without the daemon-issued root token", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
+  const artifact_root_dir = mkdtempSync(join(tmpdir(), "local-mcp-client-artifacts-"));
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon_port}/mcp?client_artifact_root=${encodeURIComponent(artifact_root_dir)}`,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("daemon-issued artifact root token");
+  } finally {
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(artifact_root_dir, { recursive: true, force: true });
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress rejects missing client artifact roots with descriptive message", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
+  const parent_dir = mkdtempSync(join(tmpdir(), "local-mcp-missing-root-parent-"));
+  const missing_root = join(parent_dir, "missing-root");
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon_port}/mcp?client_artifact_root=${encodeURIComponent(
+        missing_root,
+      )}&client_artifact_root_token=${encodeURIComponent(test_artifact_root_token)}`,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain(`artifact root must be an existing directory: ${missing_root}`);
+  } finally {
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(parent_dir, { recursive: true, force: true });
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress rejects client artifact roots on unauthenticated non-loopback ingress", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25, {
+    daemon_host: "0.0.0.0",
+  });
+  const artifact_root_dir = mkdtempSync(join(tmpdir(), "local-mcp-client-artifacts-"));
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon_port}/mcp?client_artifact_root=${encodeURIComponent(
+        artifact_root_dir,
+      )}&client_artifact_root_token=${encodeURIComponent(test_artifact_root_token)}`,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("client_artifact_root requires loopback daemon ingress or MCP auth");
+  } finally {
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(artifact_root_dir, { recursive: true, force: true });
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress defers non-loopback artifact root filesystem checks until initialize auth", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25, {
+    daemon_host: "0.0.0.0",
+    auth_token: "secret-token",
+  });
+  const parent_dir = mkdtempSync(join(tmpdir(), "local-mcp-deferred-root-parent-"));
+  const missing_root = join(parent_dir, "missing-root");
+  const socket = new WebSocket(
+    `ws://127.0.0.1:${daemon_port}/mcp?client_artifact_root=${encodeURIComponent(
+      missing_root,
+    )}&client_artifact_root_token=${encodeURIComponent(test_artifact_root_token)}`,
+  );
+
+  try {
+    await wait_for_socket_open(socket);
+    socket.send(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: "init",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: {
+            name: "deferred-artifact-root-test",
+            version: "0.0.1",
+          },
+          token: "wrong-token",
+        },
+      })}\n`,
+    );
+
+    const initialize_response = await wait_for_initialize_response(socket);
+    expect(initialize_response.error?.message).toBe("invalid token");
+  } finally {
+    try {
+      socket.close();
+    } catch {
+      // ignore best-effort close
+    }
+
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(parent_dir, { recursive: true, force: true });
     rmSync(daemon_state_dir, { recursive: true, force: true });
   }
 });
