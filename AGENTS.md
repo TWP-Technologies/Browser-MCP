@@ -70,3 +70,26 @@ The original code is Apache 2.0.
 - The canonical specification in `specs/local-multiplexed-browser-mcp-spec.md` is a living document and MUST be updated whenever scoped requirements are completed or materially changed.
 - Keep the canonical spec concise. If completion history grows, append detailed change history to a sidecar file (for example `specs/local-multiplexed-browser-mcp-changelog.md`) instead of inflating the canonical spec.
 - Pull requests that modify implementation paths under `local-mcp-bun/` SHOULD include corresponding living-spec status updates.
+
+## 9. Review Comment Acceptance Bar
+
+Do not accept code review comments at face value. Treat human and bot feedback as hypotheses to verify against the current head, local code, tests, specs, and project constraints before editing.
+
+Accept and implement a review comment when it identifies at least one of these:
+
+- A correctness, security, privacy, data-loss, race-condition, or compatibility issue with a plausible failure path.
+- A failing or likely-to-fail required check, test, lint, type check, release gate, or documented project contract.
+- A mismatch with this `AGENTS.md`, the living spec, public documentation, or established repo behavior that can mislead users or future agents.
+- A maintainability problem that materially reduces future safety or clarity without adding disproportionate API surface, complexity, churn, or review cost.
+- A small documentation or code comment improvement that records a non-obvious platform, security, or operational constraint.
+
+Reject, defer, or explain instead of implementing when a comment is:
+
+- A pure style preference, naming preference, or nit that is not backed by an existing repo convention or measurable readability gain.
+- Stale, duplicate, already addressed, outside the current head, or based on an incorrect reading of the code.
+- A request to add public API, configuration, dependencies, abstractions, or test-only hooks solely to satisfy a test or reviewer preference.
+- Speculative hardening whose complexity or portability cost is larger than the demonstrated risk.
+- A broad refactor, cleanup, or formatting change unrelated to the PR's behavioral surface.
+- A remote-review loop trigger or reviewer command whose only purpose is to see what the bot says next.
+
+When a comment is addressed, keep the fix narrow, add or update focused tests when risk justifies it, and resolve/reply to the review thread with the concrete change. When a comment is rejected, leave a concise technical rationale if the thread is current or likely to recur. Do not keep pushing commits to chase low-value nits after required checks are green and no material unresolved review threads remain.
