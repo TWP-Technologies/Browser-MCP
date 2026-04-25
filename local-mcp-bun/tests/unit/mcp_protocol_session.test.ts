@@ -1,3 +1,4 @@
+// Modified by [KnotFalse]
 import { expect, test } from "bun:test";
 import { mcp_protocol_session } from "../../src/mcp_protocol_session";
 import { local_mcp_runtime } from "../../src/runtime";
@@ -75,6 +76,141 @@ test("mcp_protocol_session rebinds stale initialized-session notifications after
     expect(active_sessions[0]).not.toBe(agent_session_id);
     expect(released_session_ids).toEqual([agent_session_id]);
     expect(responses).toHaveLength(1);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("mcp_protocol_session reports invalid deferred artifact roots as client errors", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const responses: json_rpc_response[] = [];
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+    artifact_root_context: () => {
+      throw new Error("artifact root must be an existing directory: /missing-artifact-root");
+    },
+  });
+
+  try {
+    await protocol_session.handle_line(build_initialize_request("init", "bad-artifact-root"));
+
+    const response = responses.find((candidate_response) => candidate_response.id === "init");
+    const error_data = response?.error?.data as
+      | {
+          code?: string;
+          details?: {
+            cause?: string;
+          };
+        }
+      | undefined;
+
+    expect(response?.error?.code).toBe(-32001);
+    expect(error_data?.code).toBe("INVALID_ARGUMENT");
+    expect(error_data?.details?.cause).toContain("artifact root must be an existing directory");
+    expect(runtime.session_registry.list_active_sessions()).toEqual([]);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("mcp_protocol_session clones object artifact roots before opening sessions", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const artifact_root_context = {
+    artifact_root: "/workspace-a",
+    artifact_root_real: "/workspace-a",
+  };
+  const responses: json_rpc_response[] = [];
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+    artifact_root_context,
+  });
+
+  artifact_root_context.artifact_root = "/mutated-workspace";
+
+  try {
+    await protocol_session.handle_line(build_initialize_request("init", "cloned-artifact-root"));
+
+    const response = responses.find((candidate_response) => candidate_response.id === "init");
+    const agent_session_id = response?.result?.agent_session_id;
+    expect(typeof agent_session_id).toBe("string");
+
+    expect(runtime.session_registry.get_session_artifact_root_context(agent_session_id as string)).toEqual({
+      artifact_root: "/workspace-a",
+      artifact_root_real: "/workspace-a",
+    });
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("mcp_protocol_session pins deferred artifact roots across implicit rebinds", async () => {
+  const runtime = new local_mcp_runtime({
+    bridge_mode: "in_memory",
+    bridge_host: "127.0.0.1",
+    bridge_port: 37777,
+  });
+
+  const responses: json_rpc_response[] = [];
+  let resolve_count = 0;
+  const protocol_session = new mcp_protocol_session({
+    runtime,
+    write_response: (response) => {
+      responses.push(response);
+    },
+    artifact_root_context: () => {
+      resolve_count += 1;
+      return resolve_count === 1
+        ? {
+            artifact_root: "/workspace-a",
+            artifact_root_real: "/workspace-a",
+          }
+        : {
+            artifact_root: "/workspace-b",
+            artifact_root_real: "/workspace-b",
+          };
+    },
+  });
+
+  try {
+    await protocol_session.handle_line(build_initialize_request("init", "pinned-artifact-root"));
+
+    const initial_response = responses.find((candidate_response) => candidate_response.id === "init");
+    const initial_agent_session_id = initial_response?.result?.agent_session_id;
+    expect(typeof initial_agent_session_id).toBe("string");
+
+    await runtime.tool_router.close_session(initial_agent_session_id as string);
+    await protocol_session.handle_line(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "tools",
+        method: "tools/list",
+      }),
+    );
+
+    const rebound_agent_session_id = runtime.session_registry.list_active_sessions()[0];
+    expect(typeof rebound_agent_session_id).toBe("string");
+    expect(rebound_agent_session_id).not.toBe(initial_agent_session_id);
+    expect(resolve_count).toBe(1);
+    expect(runtime.session_registry.get_session_artifact_root_context(rebound_agent_session_id as string)).toEqual({
+      artifact_root: "/workspace-a",
+      artifact_root_real: "/workspace-a",
+    });
   } finally {
     await runtime.stop();
   }

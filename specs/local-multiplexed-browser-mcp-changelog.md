@@ -1,5 +1,62 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-04-25
+
+### Per-Client Artifact Roots Review Follow-Up
+
+- KnotFalse updated `local-mcp-bun/README.md` together with the per-client artifact-root implementation notes so setup guidance matches the daemon token, attachment, and redaction behavior; compatibility remains backward-compatible for default loopback clients, with explicit opt-out/opt-in controls documented for tunneled or remote daemon deployments.
+
+## 2026-04-24
+
+### Per-Client Artifact Roots
+
+- Shared-daemon stdio proxies now pass their launch cwd to daemon ingress as connection metadata.
+- MCP sessions now store an internal artifact root, so screenshot/PDF relative `path` writes are scoped to the calling client session instead of the shared daemon cwd.
+- Artifact path validation still rejects workspace escapes and symlink file targets.
+- Artifact-root metadata is attached automatically only for loopback daemon URLs; non-loopback attachment requires `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=1`/`true`, and unauthenticated non-loopback daemon ingress rejects it.
+- Loopback artifact-root attachment can be disabled with `MCP_ATTACH_CLIENT_ARTIFACT_ROOT=0`/`false` for tunnel or remote-proxy deployments.
+- Missing artifact roots now return a descriptive validation error instead of leaking raw `realpath`/`ENOENT` text.
+- Parent-directory creation now validates existing path segments before creating missing directories so symlinked ancestors cannot create directories outside the artifact root before rejection.
+- Parent-directory creation tolerates concurrent directory creation by treating `EEXIST` as a race to revalidate, not as a persistence failure.
+- Artifact writes now revalidate that the session root path still resolves to its original canonical root before root-level files are persisted, preventing post-session root replacement from redirecting artifacts.
+- Daemon ingress now requires a daemon-issued artifact-root token before accepting `client_artifact_root` connection metadata, and stdio proxies read that capability from owner-scoped daemon state.
+- Proxy connection errors redact artifact-root metadata, and proxies fall back to daemon-cwd artifact writes only when per-client attachment is disabled or not expected.
+- Proxies now use daemon-state artifact-root tokens only when the state record matches daemon health by start time, pid, and ports, avoiding stale-token startup failures.
+- Default daemon artifact roots now fall back to the OS temp directory if the daemon launch cwd has been deleted, so non-artifact MCP clients can still connect.
+- Stdio proxies now skip client artifact-root attachment when their own cwd is unavailable, preventing stale client cwd paths from blocking MCP traffic.
+- Artifact root revalidation now reports a normal artifact validation error if the root is deleted before a screenshot/PDF write.
+- Proxy artifact-root tokens are now stripped whenever client artifact-root attachment is disabled, and daemon-state token reuse requires the dialed daemon host to match.
+- Session artifact roots now live in registry-private storage and are excluded from the exported `agent_session` shape and connection snapshots.
+- Proxies now fail startup instead of silently falling back to daemon-cwd artifacts when per-client attachment was expected but the daemon artifact-root token is missing or stale.
+- Artifact containment and destination checks now normalize more filesystem race cases, including dot-prefixed child paths and disappearing destination checks.
+- Daemon state writes now use a mode-0600 temporary file and atomic rename to avoid exposing refreshed artifact-root tokens through pre-existing broader file modes.
+- Daemon state writes no longer chmod after rename, avoiding spurious startup/shutdown failures after a successful atomic state write.
+- Daemon-state host matching now treats loopback aliases as equivalent while still rejecting non-loopback mismatches, and artifact-root token validation uses timing-safe comparison.
+- Deferred artifact-root resolution failures now report `INVALID_ARGUMENT`, and artifact file writes use a no-follow file open on POSIX to avoid following destination symlinks after validation.
+- Artifact persistence now rejects directory targets explicitly, session registry stores artifact-root contexts by copy, and proxy auto-auth token hints are emitted only when daemon state matches the dialed daemon.
+- Artifact parent creation now revalidates the walked parent immediately before each nested directory creation, and stdio proxy startup preserves explicit artifact-root URL metadata when cwd is unavailable.
+- Artifact writes now open without truncating first and revalidate path parents again before file mutation, reducing parent-symlink races around final file opens.
+- Artifact writes now use a same-directory temp file plus final rename, so writable handles are never opened through the caller-requested final pathname.
+- Screenshot/PDF calls now keep the captured payload if a post-capture artifact-root lookup races session cleanup, returning `saved: false` with a structured artifact persistence error.
+- Stale daemon-state token failures now include the state file path and explicit recovery options.
+- Nested artifact directory creation now allows a symlinked artifact root that was already accepted and pinned by realpath, while still rejecting symlinks below that root.
+- Proxies now wait for matching daemon state when auto-auth is requested by an auth-enabled daemon, even when artifact-root attachment is disabled, so the generated initialize token can be surfaced.
+- Stdio proxy URL building now overwrites stale `client_artifact_root_token` query values with the current daemon-issued token whenever artifact-root attachment is enabled.
+- Artifact writes now anchor temp-file creation and final rename to the opened parent directory on Linux, then verify the final realpath matches the requested destination before reporting success.
+- MCP protocol sessions now pin the first resolved artifact root context across implicit rebinds, and screenshot/PDF calls preserve `saved: false` artifact responses if cleanup removes the session before the recovery mark.
+- Daemon state and ingress health now share one start timestamp, keeping daemon-state freshness checks stable across process startup timing differences.
+- Daemon state is now persisted only after ingress binds successfully, and object-form protocol artifact roots are copied before session reuse.
+- Proxies now wait for a matching persisted daemon state record before deriving artifact-root tokens, closing the `/health`-before-state first-start race without delaying startup solely for optional auto-auth logging.
+- Proxy health polling and daemon-state polling now share one connect deadline so failed startup cannot exceed the advertised daemon connect timeout.
+- Daemon idle and signal shutdown now continue ingress/runtime teardown even if the best-effort daemon-state refresh fails.
+- Artifact-root context cloning now lives in the shared artifact helper and is reused by protocol sessions and the session registry.
+- Raw filesystem failures while persisting artifacts now surface as `TOOL_FAILED` while validation failures remain `INVALID_ARGUMENT`.
+- Auth-enabled non-loopback daemon ingress now defers artifact-root filesystem validation until after initialize token validation to avoid pre-auth path-existence probing.
+
+### Verification
+
+- Added unit and integration coverage for encoded proxy artifact-root URLs, daemon-issued artifact-root token attachment and rejection, delayed daemon-state availability after health readiness, remote URL suppression/explicit attach, daemon-ingress artifact root handoff, non-loopback unauthenticated rejection, missing-root errors, pre-auth validation deferral, parent-symlink rejection, root-symlink replacement rejection, and two sessions writing the same relative screenshot path to distinct client roots.
+
 ## 2026-04-23
 
 ### v0.5.1 Cleanup Contract (FR-016, FR-017)

@@ -1,5 +1,13 @@
+// Modified by [KnotFalse]
 import { tool_error } from "./errors";
 import { local_mcp_runtime } from "./runtime";
+import {
+  clone_artifact_root_context,
+  clone_artifact_root_context_input,
+  resolve_default_artifact_root,
+  type artifact_root_context,
+  type artifact_root_context_input,
+} from "./artifacts";
 import type { json_rpc_request, json_rpc_response } from "./types";
 
 const default_mcp_protocol_version = "2024-11-05";
@@ -13,6 +21,7 @@ export const server_info = {
 interface mcp_protocol_session_options {
   runtime: local_mcp_runtime;
   write_response: (response: json_rpc_response) => void;
+  artifact_root_context?: artifact_root_context_input;
   on_agent_session_bound?: (agent_session_id: string) => void;
   on_agent_session_released?: (agent_session_id: string) => void;
 }
@@ -20,8 +29,10 @@ interface mcp_protocol_session_options {
 export class mcp_protocol_session {
   private readonly runtime: local_mcp_runtime;
   private readonly write_response: (response: json_rpc_response) => void;
+  private readonly artifact_root_context_source: artifact_root_context_input;
   private readonly on_agent_session_bound?: (agent_session_id: string) => void;
   private readonly on_agent_session_released?: (agent_session_id: string) => void;
+  private pinned_artifact_root_context: artifact_root_context | null;
   private initialized_agent_session_id: string | null;
   private initialized_client_name: string | undefined;
   private initialized_token: string | undefined;
@@ -31,8 +42,12 @@ export class mcp_protocol_session {
   public constructor(options: mcp_protocol_session_options) {
     this.runtime = options.runtime;
     this.write_response = options.write_response;
+    this.artifact_root_context_source = clone_artifact_root_context_input(
+      options.artifact_root_context ?? resolve_default_artifact_root(),
+    );
     this.on_agent_session_bound = options.on_agent_session_bound;
     this.on_agent_session_released = options.on_agent_session_released;
+    this.pinned_artifact_root_context = null;
     this.initialized_agent_session_id = null;
     this.initialized_client_name = undefined;
     this.initialized_token = undefined;
@@ -119,8 +134,13 @@ export class mcp_protocol_session {
           }
         }
 
-        const result = this.runtime.tool_router.open_session(client_name, token);
+        const result = this.runtime.tool_router.open_session(
+          client_name,
+          token,
+          this.resolve_artifact_root_context_for_open(),
+        );
         const session = this.runtime.session_registry.get_session(result.agent_session_id);
+        this.pin_artifact_root_context(result.agent_session_id);
         this.initialized_client_name = client_name;
         this.initialized_token = session.auth_mode === "token" ? token : undefined;
         this.initialized_auth_mode = session.auth_mode;
@@ -346,6 +366,20 @@ export class mcp_protocol_session {
     this.runtime.session_registry.touch_session(agent_session_id);
   }
 
+  private resolve_artifact_root_context_for_open(): artifact_root_context_input {
+    return this.pinned_artifact_root_context ?? this.artifact_root_context_source;
+  }
+
+  private pin_artifact_root_context(agent_session_id: string): void {
+    if (this.pinned_artifact_root_context) {
+      return;
+    }
+
+    this.pinned_artifact_root_context = clone_artifact_root_context(
+      this.runtime.session_registry.get_session_artifact_root_context(agent_session_id),
+    );
+  }
+
   private resolve_initialized_agent_session_id(): string | null {
     if (!this.initialized_agent_session_id) {
       return null;
@@ -371,13 +405,18 @@ export class mcp_protocol_session {
 
     let result: { agent_session_id: string };
     try {
-      result = this.runtime.tool_router.open_session(this.initialized_client_name, this.initialized_token);
+      result = this.runtime.tool_router.open_session(
+        this.initialized_client_name,
+        this.initialized_token,
+        this.resolve_artifact_root_context_for_open(),
+      );
     } catch (error) {
       this.clear_initialized_client_state();
       throw error;
     }
 
     const session = this.runtime.session_registry.get_session(result.agent_session_id);
+    this.pin_artifact_root_context(result.agent_session_id);
     this.initialized_auth_mode = session.auth_mode;
     this.set_initialized_agent_session_id(result.agent_session_id);
     return result.agent_session_id;

@@ -1,6 +1,8 @@
+// Modified by [KnotFalse]
 import { expect, test } from "bun:test";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join, sep } from "node:path";
+import { resolve_artifact_root } from "../../src/artifacts";
 import { tool_error } from "../../src/errors";
 import { in_memory_bridge_transport } from "../../src/bridge_transport";
 import { local_mcp_runtime } from "../../src/runtime";
@@ -12,6 +14,7 @@ function parse_test_bridge_port(): number {
 }
 
 const test_bridge_port = parse_test_bridge_port();
+const symlink_test = process.platform === "win32" ? test.skip : test;
 
 function create_runtime() {
   return new local_mcp_runtime({
@@ -393,6 +396,81 @@ test("browser_take_screenshot persists image artifacts when path is requested", 
   }
 });
 
+test("browser_take_screenshot keeps captured payload when artifact session lookup and recovery race cleanup", async () => {
+  const runtime = create_runtime();
+  const session_id = await open_attached_session(runtime, "screenshot-session-race");
+  const original_get_context = runtime.session_registry.get_session_artifact_root_context.bind(runtime.session_registry);
+
+  runtime.session_registry.get_session_artifact_root_context = (lookup_session_id: string) => {
+    if (lookup_session_id === session_id) {
+      runtime.session_registry.close_session(session_id);
+      throw new tool_error("SESSION_NOT_FOUND", `unknown session: ${lookup_session_id}`, false, {
+        agent_session_id: lookup_session_id,
+      });
+    }
+
+    return original_get_context(lookup_session_id);
+  };
+
+  try {
+    const result = await runtime.tool_router.call_tool(session_id, "browser_take_screenshot", {
+      type: "png",
+      path: "capture.png",
+    });
+
+    expect(result.saved).toBe(false);
+    expect(result.path).toBe("capture.png");
+    expect(typeof result.data_base64).toBe("string");
+    expect((result.data_base64 as string).length).toBeGreaterThan(0);
+    expect((result.artifact_error as { code?: unknown }).code).toBe("SESSION_NOT_FOUND");
+  } finally {
+    runtime.session_registry.get_session_artifact_root_context = original_get_context;
+    await runtime.stop();
+  }
+});
+
+test("browser_take_screenshot resolves relative artifact paths per session", async () => {
+  const runtime = create_runtime();
+  const first_output_dir = create_workspace_output_dir("local-mcp-session-a-");
+  const second_output_dir = create_workspace_output_dir("local-mcp-session-b-");
+
+  try {
+    const first_session_id = runtime.tool_router.open_session(
+      "screenshot-path-a",
+      undefined,
+      resolve_artifact_root(first_output_dir),
+    ).agent_session_id;
+    const second_session_id = runtime.tool_router.open_session(
+      "screenshot-path-b",
+      undefined,
+      resolve_artifact_root(second_output_dir),
+    ).agent_session_id;
+    await runtime.tool_router.call_tool(first_session_id, "attach_to_tab", { tab_id: 101 });
+    await runtime.tool_router.call_tool(second_session_id, "attach_to_tab", { tab_id: 102 });
+
+    const relative_path = "captures/shared-name.png";
+    const first_result = await runtime.tool_router.call_tool(first_session_id, "browser_take_screenshot", {
+      type: "png",
+      path: relative_path,
+    });
+    const second_result = await runtime.tool_router.call_tool(second_session_id, "browser_take_screenshot", {
+      type: "png",
+      path: relative_path,
+    });
+
+    const first_expected_path = join(first_output_dir, relative_path);
+    const second_expected_path = join(second_output_dir, relative_path);
+    expect(first_result.path).toBe(first_expected_path);
+    expect(second_result.path).toBe(second_expected_path);
+    expect(readFileSync(first_expected_path).byteLength).toBeGreaterThan(0);
+    expect(readFileSync(second_expected_path).byteLength).toBeGreaterThan(0);
+  } finally {
+    rmSync(first_output_dir, { recursive: true, force: true });
+    rmSync(second_output_dir, { recursive: true, force: true });
+    await runtime.stop();
+  }
+});
+
 test("browser_pdf_save persists artifacts when path is requested", async () => {
   const runtime = create_runtime();
   const session_id = await open_attached_session(runtime, "pdf-path");
@@ -449,6 +527,66 @@ test("artifact persistence rejects absolute paths with traversal segments", asyn
     expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
     expect((error as tool_error).message).toContain("artifact path must stay within the current workspace");
   } finally {
+    await runtime.stop();
+  }
+});
+
+symlink_test("artifact persistence rejects parent symlinks before creating escaped directories", async () => {
+  const runtime = create_runtime();
+  const output_dir = create_workspace_output_dir("local-mcp-symlink-root-");
+  const outside_dir = create_workspace_output_dir("local-mcp-symlink-outside-");
+  const link_path = join(output_dir, "outside-link");
+  symlinkSync(outside_dir, link_path, "dir");
+  const session_id = runtime.tool_router.open_session(
+    "artifact-symlink-parent",
+    undefined,
+    resolve_artifact_root(output_dir),
+  ).agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_take_screenshot", {
+      type: "png",
+      path: "outside-link/created/capture.png",
+    });
+    throw new Error("expected artifact symlink validation to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("artifact path cannot traverse a symbolic link");
+    expect(existsSync(join(outside_dir, "created"))).toBe(false);
+  } finally {
+    rmSync(output_dir, { recursive: true, force: true });
+    rmSync(outside_dir, { recursive: true, force: true });
+    await runtime.stop();
+  }
+});
+
+symlink_test("artifact persistence revalidates the root before root-level writes", async () => {
+  const runtime = create_runtime();
+  const output_dir = create_workspace_output_dir("local-mcp-root-swap-");
+  const outside_dir = create_workspace_output_dir("local-mcp-root-swap-outside-");
+  const root_context = resolve_artifact_root(output_dir);
+  const session_id = runtime.tool_router.open_session("artifact-root-swap", undefined, root_context).agent_session_id;
+  await runtime.tool_router.call_tool(session_id, "attach_to_tab", { tab_id: 101 });
+
+  rmSync(output_dir, { recursive: true, force: true });
+  symlinkSync(outside_dir, output_dir, "dir");
+
+  try {
+    await runtime.tool_router.call_tool(session_id, "browser_take_screenshot", {
+      type: "png",
+      path: "root-level-capture.png",
+    });
+    throw new Error("expected artifact root revalidation to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(tool_error);
+    expect((error as tool_error).code).toBe("INVALID_ARGUMENT");
+    expect((error as tool_error).message).toContain("artifact path must stay within the current workspace");
+    expect(existsSync(join(outside_dir, "root-level-capture.png"))).toBe(false);
+  } finally {
+    rmSync(output_dir, { recursive: true, force: true });
+    rmSync(outside_dir, { recursive: true, force: true });
     await runtime.stop();
   }
 });

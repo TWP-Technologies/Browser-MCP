@@ -1,8 +1,9 @@
+// Modified by [KnotFalse]
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { resolve_auth_token } from "./config";
+import { basename, dirname, join, resolve } from "node:path";
+import { is_loopback_host, resolve_auth_token } from "./config";
 import { daemon_ingress_server, type daemon_health_snapshot } from "./daemon_ingress_server";
 import { mcp_stdio_server } from "./mcp_stdio_server";
 import { local_mcp_runtime, type runtime_options } from "./runtime";
@@ -14,7 +15,7 @@ interface daemon_auth_resolution {
   auto_requested: boolean;
 }
 
-interface daemon_state_record {
+export interface daemon_state_record {
   service: "local-mcp-daemon";
   pid: number;
   started_at: string;
@@ -27,6 +28,7 @@ interface daemon_state_record {
   auth_auto: boolean;
   auth_token?: string;
   auth_token_hint?: string;
+  artifact_root_token?: string;
 }
 
 export interface daemon_run_options {
@@ -101,8 +103,27 @@ function read_daemon_state(path: string): daemon_state_record | undefined {
 }
 
 function write_daemon_state(path: string, state: daemon_state_record): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const state_dir = dirname(path);
+  const tmp_path = join(state_dir, `.${basename(path)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  mkdirSync(state_dir, { recursive: true });
+
+  try {
+    writeFileSync(tmp_path, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(tmp_path, path);
+  } catch (error) {
+    rmSync(tmp_path, { force: true });
+    throw error;
+  }
+}
+
+function sleep(timeout_ms: number): Promise<void> {
+  return new Promise((resolve_promise) => {
+    setTimeout(resolve_promise, timeout_ms);
+  });
+}
+
+function remaining_timeout_ms(deadline_ms: number): number {
+  return Math.max(0, deadline_ms - Date.now());
 }
 
 function build_token_hint(token: string): string {
@@ -111,6 +132,168 @@ function build_token_hint(token: string): string {
   }
 
   return `${token.slice(0, 8)}***`;
+}
+
+function build_artifact_root_token(): string {
+  return `artifact-root-${crypto.randomUUID()}`;
+}
+
+function resolve_client_artifact_root_attachment_override(env: Record<string, string | undefined>): boolean | undefined {
+  const configured = get_non_empty_string(env.MCP_ATTACH_CLIENT_ARTIFACT_ROOT)?.toLowerCase();
+  if (configured === "1" || configured === "true") {
+    return true;
+  }
+
+  if (configured === "0" || configured === "false") {
+    return false;
+  }
+
+  return undefined;
+}
+
+export function should_attach_client_artifact_root_to_daemon(
+  daemon_target: Pick<daemon_run_options, "daemon_host">,
+  env: Record<string, string | undefined>,
+): boolean {
+  const configured = resolve_client_artifact_root_attachment_override(env);
+  if (typeof configured === "boolean") {
+    return configured;
+  }
+
+  return is_loopback_host(daemon_target.daemon_host);
+}
+
+export interface proxy_artifact_root_attachment {
+  attach_client_artifact_root: boolean;
+  artifact_root_token?: string;
+  missing_artifact_root_token: boolean;
+}
+
+function daemon_hosts_match(state_host: string | undefined, target_host: string): boolean {
+  if (state_host === target_host) {
+    return true;
+  }
+
+  return typeof state_host === "string" && is_loopback_host(state_host) && is_loopback_host(target_host);
+}
+
+function daemon_state_matches_health(
+  daemon_target: Pick<daemon_run_options, "daemon_host">,
+  daemon_health: Pick<daemon_health_snapshot, "started_at" | "pid" | "daemon_port" | "bridge_port">,
+  daemon_state:
+    | { daemon_host?: string; started_at?: string; pid?: number; daemon_port?: number; bridge_port?: number }
+    | undefined,
+): boolean {
+  return (
+    typeof daemon_state === "object" &&
+    daemon_state !== null &&
+    daemon_hosts_match(daemon_state.daemon_host, daemon_target.daemon_host) &&
+    daemon_state.started_at === daemon_health.started_at &&
+    daemon_state.pid === daemon_health.pid &&
+    daemon_state.daemon_port === daemon_health.daemon_port &&
+    daemon_state.bridge_port === daemon_health.bridge_port
+  );
+}
+
+export function resolve_proxy_artifact_root_attachment(
+  daemon_target: Pick<daemon_run_options, "daemon_host">,
+  daemon_health: Pick<daemon_health_snapshot, "started_at" | "pid" | "daemon_port" | "bridge_port">,
+  env: Record<string, string | undefined>,
+  daemon_state:
+    | {
+        daemon_host?: string;
+        started_at?: string;
+        pid?: number;
+        daemon_port?: number;
+        bridge_port?: number;
+        artifact_root_token?: string;
+      }
+    | undefined,
+): proxy_artifact_root_attachment {
+  const requested_attach = should_attach_client_artifact_root_to_daemon(daemon_target, env);
+  const artifact_root_token = daemon_state_matches_health(daemon_target, daemon_health, daemon_state)
+    ? get_non_empty_string(daemon_state?.artifact_root_token)
+    : undefined;
+
+  if (!requested_attach) {
+    return {
+      attach_client_artifact_root: false,
+      missing_artifact_root_token: false,
+    };
+  }
+
+  if (!artifact_root_token) {
+    return {
+      attach_client_artifact_root: false,
+      missing_artifact_root_token: true,
+    };
+  }
+
+  return {
+    attach_client_artifact_root: true,
+    artifact_root_token,
+    missing_artifact_root_token: false,
+  };
+}
+
+export function resolve_proxy_auth_token_for_log(
+  daemon_target: Pick<daemon_run_options, "daemon_host">,
+  daemon_health: Pick<daemon_health_snapshot, "started_at" | "pid" | "daemon_port" | "bridge_port">,
+  env: Record<string, string | undefined>,
+  daemon_state:
+    | {
+        daemon_host?: string;
+        started_at?: string;
+        pid?: number;
+        daemon_port?: number;
+        bridge_port?: number;
+        auth_token?: string;
+      }
+    | undefined,
+): string | undefined {
+  if (!is_auto_auth_requested(env) || !daemon_state_matches_health(daemon_target, daemon_health, daemon_state)) {
+    return undefined;
+  }
+
+  return get_non_empty_string(daemon_state?.auth_token);
+}
+
+function is_auto_auth_requested(env: Record<string, string | undefined>): boolean {
+  return get_non_empty_string(env.MCP_AUTH_TOKEN) === "auto" || get_non_empty_string(env.MCP_AUTH_AUTO) === "1";
+}
+
+function proxy_needs_matching_daemon_state(
+  daemon_target: Pick<daemon_run_options, "daemon_host">,
+  daemon_health: Pick<daemon_health_snapshot, "auth_enabled">,
+  env: Record<string, string | undefined>,
+): boolean {
+  return should_attach_client_artifact_root_to_daemon(daemon_target, env) || (daemon_health.auth_enabled && is_auto_auth_requested(env));
+}
+
+export async function wait_for_proxy_daemon_state(
+  options: Pick<daemon_run_options, "daemon_host" | "daemon_connect_timeout_ms" | "daemon_state_path" | "env">,
+  daemon_health: Pick<daemon_health_snapshot, "started_at" | "pid" | "daemon_port" | "bridge_port" | "auth_enabled">,
+  timeout_ms = options.daemon_connect_timeout_ms,
+): Promise<daemon_state_record | undefined> {
+  const daemon_target = { daemon_host: options.daemon_host };
+  const needs_matching_state = proxy_needs_matching_daemon_state(daemon_target, daemon_health, options.env);
+  let daemon_state = read_daemon_state(options.daemon_state_path);
+
+  if (!needs_matching_state || daemon_state_matches_health(daemon_target, daemon_health, daemon_state)) {
+    return daemon_state;
+  }
+
+  const started_at = Date.now();
+  while (Date.now() - started_at < timeout_ms) {
+    await sleep(daemon_health_poll_interval_ms);
+    daemon_state = read_daemon_state(options.daemon_state_path);
+
+    if (daemon_state_matches_health(daemon_target, daemon_health, daemon_state)) {
+      return daemon_state;
+    }
+  }
+
+  return daemon_state;
 }
 
 function resolve_daemon_auth(
@@ -174,7 +357,12 @@ async function fetch_daemon_health(
       return undefined;
     }
 
-    if (typeof payload.pid !== "number" || typeof payload.daemon_port !== "number") {
+    if (
+      typeof payload.started_at !== "string" ||
+      typeof payload.pid !== "number" ||
+      typeof payload.daemon_port !== "number" ||
+      typeof payload.bridge_port !== "number"
+    ) {
       return undefined;
     }
 
@@ -283,7 +471,11 @@ function register_daemon_signal_handlers(
 ): void {
   const shutdown = () => {
     daemon_state.updated_at = new Date().toISOString();
-    write_daemon_state(daemon_state_path, daemon_state);
+    try {
+      write_daemon_state(daemon_state_path, daemon_state);
+    } catch (error) {
+      console.error(`[daemon] failed to update daemon state during shutdown: ${error}`);
+    }
     ingress
       .stop()
       .catch(() => {
@@ -326,6 +518,8 @@ async function start_daemon_runtime(options: daemon_run_options): Promise<void> 
   const daemon_state = read_daemon_state(options.daemon_state_path);
   const auth = resolve_daemon_auth(options.env, daemon_state);
   const auth_token_hint = auth.auth_token ? build_token_hint(auth.auth_token) : undefined;
+  const artifact_root_token = build_artifact_root_token();
+  const started_at = new Date().toISOString();
   const runtime = new local_mcp_runtime({
     ...options.runtime_options,
     auth_token: auth.auth_token,
@@ -334,7 +528,7 @@ async function start_daemon_runtime(options: daemon_run_options): Promise<void> 
   const state: daemon_state_record = {
     service: "local-mcp-daemon",
     pid: process.pid,
-    started_at: new Date().toISOString(),
+    started_at,
     updated_at: new Date().toISOString(),
     daemon_host: options.daemon_host,
     daemon_port: options.daemon_port,
@@ -344,27 +538,50 @@ async function start_daemon_runtime(options: daemon_run_options): Promise<void> 
     auth_auto: auth.auto_requested,
     auth_token: auth.auto_requested ? auth.auth_token : undefined,
     auth_token_hint,
+    artifact_root_token,
   };
-  write_daemon_state(options.daemon_state_path, state);
 
-  const ingress = new daemon_ingress_server({
-    runtime,
-    daemon_host: options.daemon_host,
-    daemon_port: options.daemon_port,
-    bridge_host: options.runtime_options.bridge_host,
-    bridge_port: options.runtime_options.bridge_port,
-    daemon_state_path: options.daemon_state_path,
-    idle_timeout_ms: options.daemon_idle_timeout_ms,
-    auth_enabled: state.auth_enabled,
-    auth_token_hint: state.auth_token_hint,
-    on_idle_timeout: async () => {
-      state.updated_at = new Date().toISOString();
-      write_daemon_state(options.daemon_state_path, state);
-      await ingress.stop();
-      await runtime.stop();
-      process.exit(0);
-    },
-  });
+  let ingress: daemon_ingress_server | undefined;
+  try {
+    ingress = new daemon_ingress_server({
+      runtime,
+      daemon_host: options.daemon_host,
+      daemon_port: options.daemon_port,
+      bridge_host: options.runtime_options.bridge_host,
+      bridge_port: options.runtime_options.bridge_port,
+      daemon_state_path: options.daemon_state_path,
+      idle_timeout_ms: options.daemon_idle_timeout_ms,
+      auth_enabled: state.auth_enabled,
+      auth_token_hint: state.auth_token_hint,
+      artifact_root_token: state.artifact_root_token,
+      started_at,
+      on_idle_timeout: async () => {
+        state.updated_at = new Date().toISOString();
+        try {
+          write_daemon_state(options.daemon_state_path, state);
+        } catch (error) {
+          console.error(`[daemon] failed to update daemon state during idle shutdown: ${error}`);
+        } finally {
+          await ingress?.stop();
+          await runtime.stop();
+          process.exit(0);
+        }
+      },
+    });
+    write_daemon_state(options.daemon_state_path, state);
+  } catch (error) {
+    await ingress?.stop().catch(() => {
+      // ignore cleanup after failed daemon ingress startup
+    });
+    await runtime.stop().catch(() => {
+      // ignore cleanup after failed daemon ingress startup
+    });
+    throw error;
+  }
+
+  if (!ingress) {
+    throw new Error("daemon ingress failed to start");
+  }
 
   register_daemon_signal_handlers(runtime, ingress, state, options.daemon_state_path);
 
@@ -382,24 +599,45 @@ async function start_daemon_runtime(options: daemon_run_options): Promise<void> 
 async function start_proxy_runtime(
   options: daemon_run_options,
   daemon_health: daemon_health_snapshot,
+  daemon_state: daemon_state_record | undefined,
 ): Promise<void> {
-  const auto_requested =
-    get_non_empty_string(options.env.MCP_AUTH_TOKEN) === "auto" || get_non_empty_string(options.env.MCP_AUTH_AUTO) === "1";
+  const auth_token_for_log = resolve_proxy_auth_token_for_log(
+    { daemon_host: options.daemon_host },
+    daemon_health,
+    options.env,
+    daemon_state,
+  );
 
-  if (auto_requested) {
-    const daemon_state = read_daemon_state(options.daemon_state_path);
-    if (daemon_state?.auth_token) {
-      console.error(`[auth] daemon token for initialize.params.token: ${daemon_state.auth_token}`);
-    }
+  if (auth_token_for_log) {
+    console.error(`[auth] daemon token for initialize.params.token: ${auth_token_for_log}`);
   }
 
   if (daemon_health.auth_enabled) {
     console.error(`[daemon] connected shared runtime auth hint: ${daemon_health.auth_token_hint ?? "redacted"}`);
   }
 
+  const artifact_root_attachment = resolve_proxy_artifact_root_attachment(
+    { daemon_host: options.daemon_host },
+    daemon_health,
+    options.env,
+    daemon_state,
+  );
+  if (artifact_root_attachment.missing_artifact_root_token) {
+    const state_status = daemon_state_matches_health({ daemon_host: options.daemon_host }, daemon_health, daemon_state)
+      ? "matching daemon state is missing artifact_root_token"
+      : "daemon state file is missing or does not match the running daemon";
+    throw new Error(
+      `daemon artifact-root token missing or stale: ${state_status}; ` +
+        `state_path=${options.daemon_state_path}; daemon_pid=${daemon_health.pid}; started_at=${daemon_health.started_at}; ` +
+        "restart the shared daemon, remove the stale daemon state file, or set MCP_ATTACH_CLIENT_ARTIFACT_ROOT=0 to use daemon cwd for artifact paths",
+    );
+  }
+
   const proxy_server = new stdio_proxy_server({
     daemon_url: `ws://${options.daemon_host}:${options.daemon_port}/mcp`,
     connect_timeout_ms: options.daemon_connect_timeout_ms,
+    attach_client_artifact_root: artifact_root_attachment.attach_client_artifact_root,
+    artifact_root_token: artifact_root_attachment.artifact_root_token,
   });
   await proxy_server.start();
 }
@@ -415,10 +653,11 @@ export async function run_daemon_mode(options: daemon_run_options): Promise<void
     return;
   }
 
+  const daemon_connect_deadline_ms = Date.now() + options.daemon_connect_timeout_ms;
   let health = await fetch_daemon_health(
     options.daemon_host,
     options.daemon_port,
-    Math.min(daemon_health_request_timeout_ms, options.daemon_connect_timeout_ms),
+    Math.min(daemon_health_request_timeout_ms, remaining_timeout_ms(daemon_connect_deadline_ms)),
   );
 
   if (!health && options.daemon_mode === "auto") {
@@ -434,7 +673,11 @@ export async function run_daemon_mode(options: daemon_run_options): Promise<void
       MCP_AUTH_AUTO: options.env.MCP_AUTH_AUTO,
     });
 
-    health = await wait_for_daemon_health(options.daemon_host, options.daemon_port, options.daemon_connect_timeout_ms);
+    health = await wait_for_daemon_health(
+      options.daemon_host,
+      options.daemon_port,
+      remaining_timeout_ms(daemon_connect_deadline_ms),
+    );
   }
 
   if (!health) {
@@ -451,5 +694,10 @@ export async function run_daemon_mode(options: daemon_run_options): Promise<void
     );
   }
 
-  await start_proxy_runtime(options, health);
+  const daemon_state = await wait_for_proxy_daemon_state(
+    options,
+    health,
+    remaining_timeout_ms(daemon_connect_deadline_ms),
+  );
+  await start_proxy_runtime(options, health, daemon_state);
 }

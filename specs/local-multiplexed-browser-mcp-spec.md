@@ -19,7 +19,7 @@
 - Clean-break v2 API contract for local Bun implementation (no backward-compat guarantee with blueprint tool shapes).
 - Structured error model for lock conflicts, stale sessions, extension disconnects, and invalid tool input.
 - Debugger-backed screenshot capture that returns MCP image content and supports viewport, full-page, selector, and clipped capture modes.
-- Behavioral upstream parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, optional stable `element_ref` chaining, and optional local artifact persistence.
+- Behavioral upstream parity for overlapping local browser tools while preserving LLM-optimized structured outputs, semantic snapshots, optional stable `element_ref` chaining, and per-client local artifact persistence.
 - The server SHOULD expose first-class onboarding guidance for LLM clients through MCP prompts and a fallback learn/help tool, so clients can discover canonical browser workflows without external documentation.
 - `element_ref` reuse is fail-closed: if follow-up resolution cannot prove it still targets the original node, the runtime MUST return `STALE_ELEMENT_REFERENCE` instead of replaying against a first-match selector.
 - `browser_snapshot` and `browser_lookup` SHOULD emit `element_ref` only for nodes with a replayably stable unique selector; callers MUST treat `element_ref` as optional.
@@ -29,7 +29,7 @@
   - `browser_network_requests` SHOULD accept `request_id` as an alias for `requestId`, and the router SHOULD canonicalize it to `requestId` before forwarding the call downstream.
   - `detach_from_tab` MAY infer `tab_id` only when the session owns exactly one tab; otherwise it MUST fail with a corrective `INVALID_ARGUMENT`.
 - Crash/restart recovery for client exits and extension restarts.
-- Local-only security boundary: loopback binding with optional token authentication and zero cloud relay dependency.
+- Local-only security boundary: loopback binding with optional token authentication, daemon-issued capability checks for per-client artifact-root metadata, explicit opt-in for non-loopback artifact-root attachment, and zero cloud relay dependency.
 - Co-located repository layout for Bun server and custom extension in a single implementation tree.
 - Living specification governance and completion-state updates tied to delivered milestones.
 
@@ -66,7 +66,7 @@
 
 ## 3.0 Data Models (Required)
 
-- `agent_session`: `agent_session_id` (REQUIRED, string, unique, human-readable prefix + nonce), `client_name` (OPTIONAL, string, max 64 chars), `connected_at` (REQUIRED, RFC3339 timestamp), `last_seen_at` (REQUIRED, RFC3339 timestamp), `resource_reaped_at` (OPTIONAL, RFC3339 timestamp, set when browser resources are soft-reaped and cleared when the session revives), `state` (REQUIRED, enum: `connected|disconnecting|disconnected`), `auth_mode` (REQUIRED, enum: `none|token`), `owned_tab_ids` (REQUIRED, array<number>, default `[]`).
+- `agent_session`: `agent_session_id` (REQUIRED, string, unique, human-readable prefix + nonce), `client_name` (OPTIONAL, string, max 64 chars), `connected_at` (REQUIRED, RFC3339 timestamp), `last_seen_at` (REQUIRED, RFC3339 timestamp), `resource_reaped_at` (OPTIONAL, RFC3339 timestamp, set when browser resources are soft-reaped and cleared when the session revives), `state` (REQUIRED, enum: `connected|disconnecting|disconnected`), `auth_mode` (REQUIRED, enum: `none|token`), `owned_tab_ids` (REQUIRED, array<number>, default `[]`). Artifact roots are server-internal session registry metadata and MUST NOT appear in exported session snapshots.
 - `cleanup_policy`: `stale_session_timeout_minutes` (REQUIRED, integer, `0` disables automatic cleanup, default `120`).
 - `extension_bridge`: `bridge_id` (REQUIRED, string), `connection_state` (REQUIRED, enum: `up|down|reconnecting`), `connected_at` (OPTIONAL, RFC3339 timestamp), `last_disconnect_reason` (OPTIONAL, enum: `socket_closed|heartbeat_timeout|manual|unknown`), `protocol_version` (REQUIRED, semver string).
 - `tab_snapshot`: `tab_id` (REQUIRED, integer > 0), `url` (REQUIRED, URL string), `title` (REQUIRED, string), `debugger_attached` (REQUIRED, boolean), `is_locked_by_agent` (REQUIRED, boolean), `locked_by_agent_session_id` (OPTIONAL, string when locked), `lock_acquired_at` (OPTIONAL, RFC3339 timestamp).
@@ -155,7 +155,7 @@
 | FR-008 | Crash Recovery | The system MUST reclaim locks and reconcile state when a client crashes or disconnects unexpectedly. | High | Unit (session cleanup), Integration (socket close hooks), E2E (kill client while lock held). |
 | FR-009 | Extension Restart Recovery | The system MUST reconcile stale attachments/locks when extension disconnects and reconnects, MUST fail in-flight bridge requests deterministically during disconnect, and MUST recover post-reconnect routing without cross-session corruption. | High | Integration (bridge reconnect + in-flight disconnect fault), E2E (restart/disconnect mid-command), Regression (post-reconnect attach/tool call works). |
 | FR-010 | Structured Error Contract | The system MUST return structured error payloads with code, retryability, and correlation ID for all tool failures. | High | Unit (error mapping), Contract/API (error schema), E2E (assert consistent error shape). |
-| FR-011 | Local Security Boundary | The system MUST bind loopback only and SHOULD support optional token authentication without mandatory manual setup. | High | Unit (config defaults), Integration (localhost only binding), Security (auth optional + rejection cases). |
+| FR-011 | Local Security Boundary | The system MUST bind the browser bridge loopback-only, SHOULD support optional token authentication without mandatory manual setup, MUST NOT accept per-client artifact-root metadata without a daemon-issued artifact-root token, MUST NOT accept per-client artifact-root metadata on unauthenticated non-loopback daemon ingress, and MUST NOT auto-send client cwd metadata to non-loopback daemon ingress without explicit opt-in. | High | Unit (config defaults), Integration (localhost-only binding + artifact-root gate), Security (auth optional + rejection cases). |
 | FR-012 | AGENTS Governance Update | The implementation MUST update `AGENTS.md` with living-spec maintenance directive and co-located directory policy. | Medium | Unit (lint/check rule for directive presence), Integration (CI policy check), E2E (spec update process in PR workflow). |
 | FR-013 | Repository Layout Standard | The implementation MUST use a co-located layout where custom extension resides under the local Bun implementation tree. | High | Unit (path resolver tests), Integration (build/test scripts detect expected layout), E2E (end-to-end dev bootstrap on clean clone). |
 | FR-014 | Cross-Platform Test Matrix | The system MUST run required test suites on Linux, macOS, and Windows in CI for release eligibility, and MUST publish per-OS hard-gate evidence artifacts for auditability. | Critical | Integration (CI workflow checks + artifact upload), E2E (matrix run with required pass gates), Performance (runtime bounds per suite). |
@@ -171,7 +171,7 @@
 | NFR-PERF-001 | Performance | Tool latency under load | p95 latency for `list_available_tabs`, `attach_to_tab`, `detach_from_tab` MUST be < 300ms with 8 concurrent clients and 20 tabs on local host. |
 | NFR-ACC-001 | Accuracy | Lock state correctness | Lock ownership reports MUST be 100% consistent with actual debugger attachment state across 10,000 simulated lock operations. |
 | NFR-REL-001 | Reliability | Recovery from crashes/restarts | System MUST recover to a consistent lock state within 3 seconds after client crash or extension reconnect in 99% of test runs. |
-| NFR-SEC-001 | Security | Local access controls | Server MUST reject non-loopback connections 100% of the time; when token auth is enabled, unauthorized requests MUST be rejected 100% of the time in tests. |
+| NFR-SEC-001 | Security | Local access controls | Browser bridge MUST reject non-loopback connections 100% of the time; daemon ingress MUST reject per-client artifact-root metadata without a daemon-issued artifact-root token 100% of the time; unauthenticated non-loopback daemon ingress MUST reject per-client artifact-root metadata 100% of the time; auth-enabled non-loopback daemon ingress MUST NOT reveal artifact-root filesystem existence before token validation; when token auth is enabled, unauthorized requests MUST be rejected 100% of the time in tests. |
 | NFR-SCALE-001 | Scalability | Concurrent agent support | System MUST support at least 8 simultaneous active client sessions with no failed routing or lock corruption during 30-minute soak tests. |
 | NFR-EXT-001 | Extensibility | Toolset growth | Adding a new tab-scoped tool MUST require no changes to lock core algorithm and no more than one new adapter module. |
 | NFR-OBS-001 | Observability | Debuggability of failures | 100% of failed tool responses MUST include correlation ID and structured error code in logs and client payloads. |
@@ -214,8 +214,11 @@
 - `browser_take_screenshot(input: { type?: "jpeg"|"png", quality?: number, fullPage?: boolean, selector?: string, element_ref?: string, padding?: number, path?: string, highlightClickables?: boolean, deviceScale?: number, clip_x?: number, clip_y?: number, clip_width?: number, clip_height?: number, clip_coordinateSystem?: "viewport"|"page" })`
   - The server MUST return an MCP `content` image block plus structured metadata describing capture mode and image MIME type.
   - Supported capture modes MUST include `viewport`, `full_page`, `selector`, and `clip`.
+  - When `path` is provided, the server SHOULD persist the screenshot relative to the calling MCP client's artifact root, not the shared daemon cwd.
+  - Shared-daemon artifact-root metadata MUST be accepted only with a daemon-issued artifact-root token and from loopback daemon ingress or authenticated daemon ingress.
 - `browser_pdf_save(input: { path?: string, landscape?: boolean })`
-  - When `path` is provided, the server SHOULD persist the PDF locally and return filesystem metadata instead of returning large inline payloads to MCP callers.
+  - When `path` is provided, the server SHOULD persist the PDF relative to the calling MCP client's artifact root and return filesystem metadata instead of returning large inline payloads to MCP callers.
+  - Shared-daemon artifact-root metadata MUST be accepted only with a daemon-issued artifact-root token and from loopback daemon ingress or authenticated daemon ingress.
 
 ### 8.5 Internal Components
 
