@@ -15,7 +15,7 @@ const local_protocol_version = "local-mcp-bun-v2";
 
 export const server_info = {
   name: "local-mcp",
-  version: "0.6.0",
+  version: "0.6.1",
 } as const;
 
 interface mcp_protocol_session_options {
@@ -103,6 +103,10 @@ export class mcp_protocol_session {
     } finally {
       this.clear_initialized_client_state();
     }
+  }
+
+  public has_recoverable_initialized_state(): boolean {
+    return !this.closed && this.initialized_auth_mode !== null;
   }
 
   private async dispatch_notification(request: json_rpc_request): Promise<void> {
