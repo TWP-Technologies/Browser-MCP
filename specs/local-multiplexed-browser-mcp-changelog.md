@@ -1,5 +1,24 @@
 # Local Multiplexed Browser MCP Spec Changelog
 
+## 2026-04-30
+
+### Recoverable Stale Cleanup Transport Close
+
+- Daemon ingress now preserves unbound idle sockets when their protocol session still has recoverable initialized state, allowing long-running Codex/agent transports to rebind even after the old resource-reaped registry entry expires.
+- Stale unbound sockets without recoverable initialized state remain eligible for cleanup so pre-initialize proxy leaks are still reclaimed.
+- Local release identifiers were updated to `0.6.1` for the package, extension manifest, MCP server info, and in-memory synthetic extension fixture.
+
+### Verification
+
+- `bun test local-mcp-bun/tests/integration/daemon_ingress_cleanup.test.ts`
+- `bun test local-mcp-bun/tests/unit/mcp_protocol_session.test.ts`
+- `bun run --cwd local-mcp-bun lint:spec`
+- `bun run --cwd local-mcp-bun lint:docs`
+- `bun run --cwd local-mcp-bun lint:compliance`
+- `bun run --cwd local-mcp-bun release:check-version -- --version v0.6.1`
+- `bun run --cwd local-mcp-bun package:release -- --mode=server --version v0.6.1 --clean`
+- Packaged binary smoke initialize reported `serverInfo.version="0.6.1"`.
+
 ## 2026-04-25
 
 ### Per-Client Artifact Roots Review Follow-Up

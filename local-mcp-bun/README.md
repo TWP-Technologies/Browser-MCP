@@ -91,7 +91,8 @@ You only need to set bridge env vars when overriding defaults (for example custo
 
 - The runtime treats staleness as lack of valid MCP traffic for the configured number of minutes.
 - Automatic cleanup soft-reaps stale browser resources by cancelling queued waiters, releasing owned locks, and detaching owned tabs when possible.
-- Live MCP transports stay open after stale cleanup so long-running Codex or agent threads can recover on their next tool call; idle unbound ingress sockets may still be closed on the same timeout.
+- Live MCP transports stay open after stale cleanup so long-running Codex or agent threads can recover on their next tool call, even after their resource-reaped registry entry is later removed.
+- Idle unbound ingress sockets may still be closed on the same timeout only when they lack recoverable initialized MCP state, so pre-initialize proxy leaks are reclaimed without killing recoverable long-running agents.
 - A resource-reaped session that never revives may be removed from the registry after another full timeout window; initialized live transports can still rebind on their next request.
 - The extension popup exposes a compact `Auto-cleanup` control with `Off` or `<minutes>m`, plus `Run Cleanup Now`.
 

@@ -90,6 +90,35 @@ async function wait_for_socket_open(socket: WebSocket): Promise<void> {
   });
 }
 
+async function wait_for_socket_close(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return;
+  }
+
+  await new Promise<void>((resolve_promise, reject_promise) => {
+    const on_close = (): void => {
+      clearTimeout(timeout_id);
+      socket.removeEventListener("close", on_close);
+      socket.removeEventListener("error", on_error);
+      resolve_promise();
+    };
+    const on_error = (): void => {
+      clearTimeout(timeout_id);
+      socket.removeEventListener("close", on_close);
+      socket.removeEventListener("error", on_error);
+      reject_promise(new Error("websocket close failed"));
+    };
+    const timeout_id = setTimeout(() => {
+      socket.removeEventListener("close", on_close);
+      socket.removeEventListener("error", on_error);
+      reject_promise(new Error("timed out waiting for websocket close"));
+    }, 5_000);
+
+    socket.addEventListener("close", on_close);
+    socket.addEventListener("error", on_error);
+  });
+}
+
 async function wait_for_initialize_response(socket: WebSocket): Promise<initialize_response> {
   return await new Promise<initialize_response>((resolve_promise, reject_promise) => {
     const timeout_id = setTimeout(() => {
@@ -491,6 +520,7 @@ test("daemon ingress lets live sockets rebind when their session was closed else
     expect(ingress_internals.last_activity_at_ms_by_connection_id.get(connection_id)).toBeGreaterThanOrEqual(
       before_cleanup_ms,
     );
+    ingress_internals.last_activity_at_ms_by_connection_id.set(connection_id, Date.now() - 3 * 60 * 60 * 1000);
     await ingress_internals.run_cleanup_tick();
     expect(close_event).toBeNull();
     expect(socket.readyState).toBe(WebSocket.OPEN);
@@ -516,6 +546,41 @@ test("daemon ingress lets live sockets rebind when their session was closed else
     expect(active_sessions[0]).not.toBe(agent_session_id);
     expect(close_event).toBeNull();
     expect(ingress.get_health_snapshot().active_proxy_connections).toBe(1);
+  } finally {
+    try {
+      socket.close();
+    } catch {
+      // ignore best-effort close
+    }
+
+    await ingress.stop();
+    await runtime.stop();
+    rmSync(daemon_state_dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon ingress closes stale unbound sockets without recoverable initialized state", async () => {
+  const { runtime, ingress, daemon_port, daemon_state_dir } = await create_test_ingress(25);
+
+  const socket = new WebSocket(`ws://127.0.0.1:${daemon_port}/mcp`);
+
+  try {
+    await wait_for_socket_open(socket);
+
+    const ingress_internals = ingress as unknown as {
+      last_activity_at_ms_by_connection_id: Map<number, number>;
+      run_cleanup_tick: () => Promise<void>;
+    };
+    const connection_id = [...ingress_internals.last_activity_at_ms_by_connection_id.keys()][0];
+    if (typeof connection_id !== "number") {
+      throw new Error("expected daemon connection");
+    }
+
+    ingress_internals.last_activity_at_ms_by_connection_id.set(connection_id, Date.now() - 3 * 60 * 60 * 1000);
+    await ingress_internals.run_cleanup_tick();
+    await wait_for_socket_close(socket);
+
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
   } finally {
     try {
       socket.close();

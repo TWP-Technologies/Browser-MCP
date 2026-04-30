@@ -419,6 +419,11 @@ export class daemon_ingress_server {
         continue;
       }
 
+      const session = this.sessions_by_connection_id.get(connection_id);
+      if (session?.has_recoverable_initialized_state()) {
+        continue;
+      }
+
       const socket = this.sockets_by_connection_id.get(connection_id);
       socket?.close(1000, "stale_connection_timeout");
     }
